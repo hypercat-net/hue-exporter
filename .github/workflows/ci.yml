@@ -8,29 +8,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   test:
-    name: Build and test
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Build
-        run: go build ./...
-
-      - name: Test coverage
-        run: |
-          go test ./... -coverprofile=coverage.out
-          total="$(go tool cover -func=coverage.out | awk '/^total:/ {print substr($3, 1, length($3)-1)}')"
-          echo "Total coverage: ${total}%"
-          awk -v cov="$total" 'BEGIN { if (cov + 0 < 70) { exit 1 } }'
-
-      - name: Vet
-        run: go vet ./...
+    uses: ./.github/workflows/go-checks.yml
