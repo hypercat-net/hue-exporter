@@ -267,7 +267,8 @@ func newSetupServer(cfg *Config, configPath string, opts hue.ClientOptions, disc
 }
 
 // setAppKeyLocked updates the effective app key and metrics handler.
-// Concurrent callers must hold s.mu.
+// Concurrent callers must hold s.mu; newSetupServer may call it during
+// initialization before the server is shared.
 func (s *setupServer) setAppKeyLocked(appKey string) {
 	s.appKey = appKey
 	if appKey == "" {
