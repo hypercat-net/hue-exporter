@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"html/template"
@@ -369,10 +370,10 @@ func (s *setupServer) rediscoverBridge() (bridgeStatus, error) {
 	if resolved.Address == "" {
 		if s.bridge.Address != "" {
 			s.bridge.Error = resolved.Error
-			return s.bridge, fmt.Errorf(resolved.Error)
+			return s.bridge, errors.New(resolved.Error)
 		}
 		s.bridge = resolved
-		return s.bridge, fmt.Errorf(resolved.Error)
+		return s.bridge, errors.New(resolved.Error)
 	}
 
 	s.bridge = resolved
