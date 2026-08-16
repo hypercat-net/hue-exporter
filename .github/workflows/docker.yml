@@ -76,4 +76,10 @@ jobs:
           # Use GitHub Actions cache to speed up subsequent builds
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          outputs: -
+          metadata-file: /tmp/build-metadata.json
+
+      - name: Upload build metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-metadata
+          path: /tmp/build-metadata.json

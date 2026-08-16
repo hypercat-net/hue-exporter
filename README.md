@@ -44,6 +44,9 @@ deprecated or archived third-party Hue libraries required).
 | `hue_scene_active` | Gauge | 1 if scene is currently active |
 | `hue_scene_scrapes_failed_total` | Counter | Failed scene scrape count |
 
+Device-backed sensor metrics expose `device_name` labels, while grouped-light and
+scene metrics expose `group_name`/`group_type`. Private groups are ignored.
+
 ## Hue API connection process
 
 ### 1. Enable local network access to the bridge

@@ -16,6 +16,11 @@ type HueCollector struct {
 	bridge hue.Bridge
 	mu     sync.Mutex
 
+	groupOwnerNames  map[string]string
+	seenGroupOwners  map[string]struct{}
+	deviceOwnerNames map[string]string
+	seenDeviceOwners map[string]struct{}
+
 	// lights
 	lightOn           *prometheus.GaugeVec
 	lightBrightness   *prometheus.GaugeVec
@@ -58,13 +63,16 @@ type HueCollector struct {
 // New creates a new HueCollector.
 func New(bridge hue.Bridge) *HueCollector {
 	lightLabels := []string{"id", "name", "archetype"}
-	groupLabels := []string{"id", "owner_id", "owner_type", "owner_name"}
-	ownerLabels := []string{"id", "owner_id"}
-	deviceOwnerLabels := []string{"id", "owner_id", "owner_name"}
-	sceneLabels := []string{"id", "name", "group_id", "group_type"}
+	groupLabels := []string{"id", "group_type", "group_name"}
+	deviceLabels := []string{"id", "device_name"}
+	sceneLabels := []string{"id", "name", "group_name", "group_type"}
 
 	return &HueCollector{
-		bridge: bridge,
+		bridge:           bridge,
+		groupOwnerNames:  map[string]string{},
+		seenGroupOwners:  map[string]struct{}{},
+		deviceOwnerNames: map[string]string{},
+		seenDeviceOwners: map[string]struct{}{},
 
 		lightOn: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: namespace,
@@ -127,13 +135,13 @@ func New(bridge hue.Bridge) *HueCollector {
 			Subsystem: "motion",
 			Name:      "detected",
 			Help:      "Whether motion is currently detected (1) or not (0).",
-		}, ownerLabels),
+		}, deviceLabels),
 		motionEnabled: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: namespace,
 			Subsystem: "motion",
 			Name:      "enabled",
 			Help:      "Whether the motion sensor is enabled (1) or disabled (0).",
-		}, ownerLabels),
+		}, deviceLabels),
 		motionScrapesTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "motion",
@@ -146,7 +154,7 @@ func New(bridge hue.Bridge) *HueCollector {
 			Subsystem: "temperature",
 			Name:      "celsius",
 			Help:      "Current temperature reading in degrees Celsius.",
-		}, ownerLabels),
+		}, deviceLabels),
 		temperatureScrapesTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "temperature",
@@ -159,7 +167,7 @@ func New(bridge hue.Bridge) *HueCollector {
 			Subsystem: "light_level",
 			Name:      "lux",
 			Help:      "Current ambient light level in lux.",
-		}, ownerLabels),
+		}, deviceLabels),
 		lightLevelScrapesTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "light_level",
@@ -172,7 +180,7 @@ func New(bridge hue.Bridge) *HueCollector {
 			Subsystem: "device",
 			Name:      "battery_level_percent",
 			Help:      "Battery level of the device as a percentage (0–100).",
-		}, deviceOwnerLabels),
+		}, deviceLabels),
 		deviceScrapesTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "device",
@@ -185,7 +193,7 @@ func New(bridge hue.Bridge) *HueCollector {
 			Subsystem: "zigbee",
 			Name:      "connected",
 			Help:      "Whether the Zigbee device is connected (1) or not (0).",
-		}, ownerLabels),
+		}, deviceLabels),
 		zigbeeScrapesTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "zigbee",
@@ -328,7 +336,11 @@ func resourceKey(rtype, rid string) string {
 	return rtype + ":" + rid
 }
 
-func (c *HueCollector) groupedLightOwnerNames() map[string]string {
+func isIgnoredGroupType(rtype string) bool {
+	return rtype == "private_group"
+}
+
+func (c *HueCollector) fetchGroupedLightOwnerNames() map[string]string {
 	names := map[string]string{}
 
 	if rooms, err := c.bridge.GetRooms(); err == nil {
@@ -346,7 +358,23 @@ func (c *HueCollector) groupedLightOwnerNames() map[string]string {
 	return names
 }
 
-func (c *HueCollector) deviceOwnerNames() map[string]string {
+func (c *HueCollector) groupedLightOwnerName(ref hue.ResourceRef) string {
+	key := resourceKey(ref.RType, ref.RID)
+	if name, ok := c.groupOwnerNames[key]; ok {
+		return name
+	}
+	if _, seen := c.seenGroupOwners[key]; seen {
+		return ""
+	}
+
+	for key, name := range c.fetchGroupedLightOwnerNames() {
+		c.groupOwnerNames[key] = name
+	}
+	c.seenGroupOwners[key] = struct{}{}
+	return c.groupOwnerNames[key]
+}
+
+func (c *HueCollector) fetchDeviceOwnerNames() map[string]string {
 	devices, err := c.bridge.GetDevices()
 	if err != nil {
 		return map[string]string{}
@@ -358,6 +386,22 @@ func (c *HueCollector) deviceOwnerNames() map[string]string {
 	}
 
 	return names
+}
+
+func (c *HueCollector) deviceOwnerName(ref hue.ResourceRef) string {
+	key := resourceKey(ref.RType, ref.RID)
+	if name, ok := c.deviceOwnerNames[key]; ok {
+		return name
+	}
+	if _, seen := c.seenDeviceOwners[key]; seen {
+		return ""
+	}
+
+	for key, name := range c.fetchDeviceOwnerNames() {
+		c.deviceOwnerNames[key] = name
+	}
+	c.seenDeviceOwners[key] = struct{}{}
+	return c.deviceOwnerNames[key]
 }
 
 func (c *HueCollector) collectLights() {
@@ -392,13 +436,18 @@ func (c *HueCollector) collectGroupedLights() {
 		c.groupedLightScrapesTotal.Add(1)
 		return
 	}
-	ownerNames := c.groupedLightOwnerNames()
 	for _, g := range groups {
+		if isIgnoredGroupType(g.Owner.RType) {
+			continue
+		}
+		groupName := c.groupedLightOwnerName(g.Owner)
+		if groupName == "" {
+			continue
+		}
 		labels := prometheus.Labels{
 			"id":         g.ID,
-			"owner_id":   g.Owner.RID,
-			"owner_type": g.Owner.RType,
-			"owner_name": ownerNames[resourceKey(g.Owner.RType, g.Owner.RID)],
+			"group_type": g.Owner.RType,
+			"group_name": groupName,
 		}
 		c.groupedLightOn.With(labels).Set(boolToFloat(g.On.On))
 		if g.Dimming != nil {
@@ -414,9 +463,13 @@ func (c *HueCollector) collectMotion() {
 		return
 	}
 	for _, s := range sensors {
+		deviceName := c.deviceOwnerName(s.Owner)
+		if deviceName == "" {
+			continue
+		}
 		labels := prometheus.Labels{
-			"id":       s.ID,
-			"owner_id": s.Owner.RID,
+			"id":          s.ID,
+			"device_name": deviceName,
 		}
 		motion := s.Motion.Motion
 		if s.Motion.MotionReport != nil {
@@ -437,9 +490,13 @@ func (c *HueCollector) collectTemperature() {
 		if !s.Temperature.TemperatureValid {
 			continue
 		}
+		deviceName := c.deviceOwnerName(s.Owner)
+		if deviceName == "" {
+			continue
+		}
 		labels := prometheus.Labels{
-			"id":       s.ID,
-			"owner_id": s.Owner.RID,
+			"id":          s.ID,
+			"device_name": deviceName,
 		}
 		temp := s.Temperature.Temperature
 		if s.Temperature.TemperatureReport != nil {
@@ -459,9 +516,13 @@ func (c *HueCollector) collectLightLevel() {
 		if !s.Light.LightLevelValid {
 			continue
 		}
+		deviceName := c.deviceOwnerName(s.Owner)
+		if deviceName == "" {
+			continue
+		}
 		labels := prometheus.Labels{
-			"id":       s.ID,
-			"owner_id": s.Owner.RID,
+			"id":          s.ID,
+			"device_name": deviceName,
 		}
 		level := s.Light.LightLevel
 		if s.Light.LightLevelReport != nil {
@@ -477,15 +538,17 @@ func (c *HueCollector) collectDevicePower() {
 		c.deviceScrapesTotal.Add(1)
 		return
 	}
-	ownerNames := c.deviceOwnerNames()
 	for _, d := range devices {
 		if d.PowerState.BatteryLevel == nil {
 			continue
 		}
+		deviceName := c.deviceOwnerName(d.Owner)
+		if deviceName == "" {
+			continue
+		}
 		labels := prometheus.Labels{
-			"id":         d.ID,
-			"owner_id":   d.Owner.RID,
-			"owner_name": ownerNames[resourceKey(d.Owner.RType, d.Owner.RID)],
+			"id":          d.ID,
+			"device_name": deviceName,
 		}
 		c.deviceBatteryLevel.With(labels).Set(float64(*d.PowerState.BatteryLevel))
 	}
@@ -498,9 +561,13 @@ func (c *HueCollector) collectZigbee() {
 		return
 	}
 	for _, d := range devices {
+		deviceName := c.deviceOwnerName(d.Owner)
+		if deviceName == "" {
+			continue
+		}
 		labels := prometheus.Labels{
-			"id":       d.ID,
-			"owner_id": d.Owner.RID,
+			"id":          d.ID,
+			"device_name": deviceName,
 		}
 		connected := d.Status == "connected"
 		c.zigbeeConnected.With(labels).Set(boolToFloat(connected))
@@ -514,10 +581,17 @@ func (c *HueCollector) collectScenes() {
 		return
 	}
 	for _, s := range scenes {
+		if isIgnoredGroupType(s.Group.RType) {
+			continue
+		}
+		groupName := c.groupedLightOwnerName(s.Group)
+		if groupName == "" {
+			continue
+		}
 		labels := prometheus.Labels{
 			"id":         s.ID,
 			"name":       s.Metadata.Name,
-			"group_id":   s.Group.RID,
+			"group_name": groupName,
 			"group_type": s.Group.RType,
 		}
 		active := s.Status.Active != "inactive" && s.Status.Active != ""

@@ -24,20 +24,33 @@ type mockBridge struct {
 	devices            []hue.Device
 	scenes             []hue.Scene
 	buttons            []hue.Button
+
+	getRoomsCalls   int
+	getZonesCalls   int
+	getDevicesCalls int
 }
 
 func (m *mockBridge) GetLights() ([]hue.Light, error)               { return m.lights, nil }
 func (m *mockBridge) GetGroupedLights() ([]hue.GroupedLight, error) { return m.groupedLights, nil }
-func (m *mockBridge) GetRooms() ([]hue.Room, error)                 { return m.rooms, nil }
-func (m *mockBridge) GetZones() ([]hue.Zone, error)                 { return m.zones, nil }
-func (m *mockBridge) GetMotion() ([]hue.Motion, error)              { return m.motion, nil }
-func (m *mockBridge) GetTemperature() ([]hue.Temperature, error)    { return m.temperature, nil }
-func (m *mockBridge) GetLightLevel() ([]hue.LightLevel, error)      { return m.lightLevel, nil }
-func (m *mockBridge) GetDevicePower() ([]hue.DevicePower, error)    { return m.devicePower, nil }
+func (m *mockBridge) GetRooms() ([]hue.Room, error) {
+	m.getRoomsCalls++
+	return m.rooms, nil
+}
+func (m *mockBridge) GetZones() ([]hue.Zone, error) {
+	m.getZonesCalls++
+	return m.zones, nil
+}
+func (m *mockBridge) GetMotion() ([]hue.Motion, error)           { return m.motion, nil }
+func (m *mockBridge) GetTemperature() ([]hue.Temperature, error) { return m.temperature, nil }
+func (m *mockBridge) GetLightLevel() ([]hue.LightLevel, error)   { return m.lightLevel, nil }
+func (m *mockBridge) GetDevicePower() ([]hue.DevicePower, error) { return m.devicePower, nil }
 func (m *mockBridge) GetZigbeeConnectivity() ([]hue.ZigbeeConnectivity, error) {
 	return m.zigbeeConnectivity, nil
 }
-func (m *mockBridge) GetDevices() ([]hue.Device, error) { return m.devices, nil }
+func (m *mockBridge) GetDevices() ([]hue.Device, error) {
+	m.getDevicesCalls++
+	return m.devices, nil
+}
 func (m *mockBridge) GetScenes() ([]hue.Scene, error)   { return m.scenes, nil }
 func (m *mockBridge) GetButtons() ([]hue.Button, error) { return m.buttons, nil }
 
@@ -200,8 +213,32 @@ func TestGroupedLight(t *testing.T) {
 	expected := `
 # HELP hue_grouped_light_on Whether any light in the group is on (1) or all are off (0).
 # TYPE hue_grouped_light_on gauge
-hue_grouped_light_on{id="group-1",owner_id="room-1",owner_name="Living Room",owner_type="room"} 1
+hue_grouped_light_on{group_name="Living Room",group_type="room",id="group-1"} 1
 `
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_grouped_light_on"); err != nil {
+		t.Errorf("unexpected metrics: %v", err)
+	}
+}
+
+func TestGroupedLightUnnamedOwnerSkipped(t *testing.T) {
+	bridge := &mockBridge{
+		groupedLights: []hue.GroupedLight{
+			{
+				ID:    "group-2",
+				On:    hue.OnState{On: true},
+				Owner: hue.ResourceRef{RID: "bridge-home-1", RType: "bridge_home"},
+			},
+			{
+				ID:    "group-3",
+				On:    hue.OnState{On: true},
+				Owner: hue.ResourceRef{RID: "private-group-1", RType: "private_group"},
+			},
+		},
+	}
+
+	reg := newTestRegistry(bridge)
+
+	expected := ``
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_grouped_light_on"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
 	}
@@ -217,6 +254,9 @@ func TestMotionDetected(t *testing.T) {
 				Owner:   hue.ResourceRef{RID: "device-1", RType: "device"},
 			},
 		},
+		devices: []hue.Device{
+			{ID: "device-1", Metadata: hue.Metadata{Name: "Hall Sensor"}},
+		},
 	}
 
 	reg := newTestRegistry(bridge)
@@ -224,7 +264,7 @@ func TestMotionDetected(t *testing.T) {
 	expected := `
 # HELP hue_motion_detected Whether motion is currently detected (1) or not (0).
 # TYPE hue_motion_detected gauge
-hue_motion_detected{id="motion-1",owner_id="device-1"} 1
+hue_motion_detected{device_name="Hall Sensor",id="motion-1"} 1
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_motion_detected"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
@@ -247,6 +287,9 @@ func TestMotionReport(t *testing.T) {
 				Owner: hue.ResourceRef{RID: "device-2", RType: "device"},
 			},
 		},
+		devices: []hue.Device{
+			{ID: "device-2", Metadata: hue.Metadata{Name: "Kitchen Sensor"}},
+		},
 	}
 
 	reg := newTestRegistry(bridge)
@@ -254,8 +297,28 @@ func TestMotionReport(t *testing.T) {
 	expected := `
 # HELP hue_motion_detected Whether motion is currently detected (1) or not (0).
 # TYPE hue_motion_detected gauge
-hue_motion_detected{id="motion-2",owner_id="device-2"} 1
+hue_motion_detected{device_name="Kitchen Sensor",id="motion-2"} 1
 `
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_motion_detected"); err != nil {
+		t.Errorf("unexpected metrics: %v", err)
+	}
+}
+
+func TestMotionMissingDeviceNameSkipped(t *testing.T) {
+	bridge := &mockBridge{
+		motion: []hue.Motion{
+			{
+				ID:      "motion-3",
+				Enabled: true,
+				Motion:  hue.MotionSensor{Motion: true},
+				Owner:   hue.ResourceRef{RID: "device-missing", RType: "device"},
+			},
+		},
+	}
+
+	reg := newTestRegistry(bridge)
+
+	expected := ``
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_motion_detected"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
 	}
@@ -274,6 +337,9 @@ func TestTemperature(t *testing.T) {
 				Owner: hue.ResourceRef{RID: "device-3", RType: "device"},
 			},
 		},
+		devices: []hue.Device{
+			{ID: "device-3", Metadata: hue.Metadata{Name: "Office Sensor"}},
+		},
 	}
 
 	reg := newTestRegistry(bridge)
@@ -281,7 +347,7 @@ func TestTemperature(t *testing.T) {
 	expected := `
 # HELP hue_temperature_celsius Current temperature reading in degrees Celsius.
 # TYPE hue_temperature_celsius gauge
-hue_temperature_celsius{id="temp-1",owner_id="device-3"} 21.5
+hue_temperature_celsius{device_name="Office Sensor",id="temp-1"} 21.5
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_temperature_celsius"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
@@ -326,6 +392,9 @@ func TestLightLevel(t *testing.T) {
 				Owner: hue.ResourceRef{RID: "device-5", RType: "device"},
 			},
 		},
+		devices: []hue.Device{
+			{ID: "device-5", Metadata: hue.Metadata{Name: "Window Sensor"}},
+		},
 	}
 
 	reg := newTestRegistry(bridge)
@@ -333,7 +402,7 @@ func TestLightLevel(t *testing.T) {
 	expected := `
 # HELP hue_light_level_lux Current ambient light level in lux.
 # TYPE hue_light_level_lux gauge
-hue_light_level_lux{id="ll-1",owner_id="device-5"} 100
+hue_light_level_lux{device_name="Window Sensor",id="ll-1"} 100
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_light_level_lux"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
@@ -366,7 +435,7 @@ func TestDeviceBattery(t *testing.T) {
 	expected := `
 # HELP hue_device_battery_level_percent Battery level of the device as a percentage (0–100).
 # TYPE hue_device_battery_level_percent gauge
-hue_device_battery_level_percent{id="dp-1",owner_id="device-6",owner_name="Hall Sensor"} 85
+hue_device_battery_level_percent{device_name="Hall Sensor",id="dp-1"} 85
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_device_battery_level_percent"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
@@ -409,6 +478,10 @@ func TestZigbeeConnected(t *testing.T) {
 				Owner:  hue.ResourceRef{RID: "device-9", RType: "device"},
 			},
 		},
+		devices: []hue.Device{
+			{ID: "device-8", Metadata: hue.Metadata{Name: "Desk Lamp"}},
+			{ID: "device-9", Metadata: hue.Metadata{Name: "Wall Switch"}},
+		},
 	}
 
 	reg := newTestRegistry(bridge)
@@ -416,8 +489,8 @@ func TestZigbeeConnected(t *testing.T) {
 	expected := `
 # HELP hue_zigbee_connected Whether the Zigbee device is connected (1) or not (0).
 # TYPE hue_zigbee_connected gauge
-hue_zigbee_connected{id="zb-1",owner_id="device-8"} 1
-hue_zigbee_connected{id="zb-2",owner_id="device-9"} 0
+hue_zigbee_connected{device_name="Desk Lamp",id="zb-1"} 1
+hue_zigbee_connected{device_name="Wall Switch",id="zb-2"} 0
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_zigbee_connected"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
@@ -426,6 +499,9 @@ hue_zigbee_connected{id="zb-2",owner_id="device-9"} 0
 
 func TestSceneActive(t *testing.T) {
 	bridge := &mockBridge{
+		rooms: []hue.Room{
+			{ID: "room-1", Metadata: hue.Metadata{Name: "Living Room"}},
+		},
 		scenes: []hue.Scene{
 			{
 				ID:       "scene-1",
@@ -447,10 +523,142 @@ func TestSceneActive(t *testing.T) {
 	expected := `
 # HELP hue_scene_active Whether the scene is currently active (1) or not (0).
 # TYPE hue_scene_active gauge
-hue_scene_active{group_id="room-1",group_type="room",id="scene-1",name="Relax"} 1
-hue_scene_active{group_id="room-1",group_type="room",id="scene-2",name="Concentrate"} 0
+hue_scene_active{group_name="Living Room",group_type="room",id="scene-1",name="Relax"} 1
+hue_scene_active{group_name="Living Room",group_type="room",id="scene-2",name="Concentrate"} 0
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_scene_active"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
+	}
+}
+
+func TestScenePrivateGroupSkipped(t *testing.T) {
+	bridge := &mockBridge{
+		scenes: []hue.Scene{
+			{
+				ID:       "scene-3",
+				Metadata: hue.Metadata{Name: "Hidden"},
+				Group:    hue.ResourceRef{RID: "private-group-1", RType: "private_group"},
+				Status:   hue.SceneStatus{Active: "static"},
+			},
+		},
+	}
+
+	reg := newTestRegistry(bridge)
+
+	expected := ``
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_scene_active"); err != nil {
+		t.Errorf("unexpected metrics: %v", err)
+	}
+}
+
+func TestOwnerNameCachesBetweenScrapes(t *testing.T) {
+	bridge := &mockBridge{
+		groupedLights: []hue.GroupedLight{
+			{
+				ID:    "group-4",
+				On:    hue.OnState{On: true},
+				Owner: hue.ResourceRef{RID: "room-2", RType: "room"},
+			},
+		},
+		rooms: []hue.Room{
+			{ID: "room-2", Metadata: hue.Metadata{Name: "Kitchen"}},
+		},
+		motion: []hue.Motion{
+			{
+				ID:      "motion-4",
+				Enabled: true,
+				Motion:  hue.MotionSensor{Motion: true},
+				Owner:   hue.ResourceRef{RID: "device-10", RType: "device"},
+			},
+		},
+		devices: []hue.Device{
+			{ID: "device-10", Metadata: hue.Metadata{Name: "Kitchen Sensor"}},
+		},
+	}
+
+	reg := newTestRegistry(bridge)
+
+	if _, err := reg.Gather(); err != nil {
+		t.Fatalf("first gather failed: %v", err)
+	}
+	if _, err := reg.Gather(); err != nil {
+		t.Fatalf("second gather failed: %v", err)
+	}
+
+	if bridge.getRoomsCalls != 1 {
+		t.Fatalf("expected GetRooms to be called once, got %d", bridge.getRoomsCalls)
+	}
+	if bridge.getZonesCalls != 1 {
+		t.Fatalf("expected GetZones to be called once, got %d", bridge.getZonesCalls)
+	}
+	if bridge.getDevicesCalls != 1 {
+		t.Fatalf("expected GetDevices to be called once, got %d", bridge.getDevicesCalls)
+	}
+}
+
+func TestOwnerNameCacheRefreshesForNewIDs(t *testing.T) {
+	bridge := &mockBridge{
+		groupedLights: []hue.GroupedLight{
+			{
+				ID:    "group-5",
+				On:    hue.OnState{On: true},
+				Owner: hue.ResourceRef{RID: "room-3", RType: "room"},
+			},
+		},
+		rooms: []hue.Room{
+			{ID: "room-3", Metadata: hue.Metadata{Name: "Bedroom"}},
+		},
+		motion: []hue.Motion{
+			{
+				ID:      "motion-5",
+				Enabled: true,
+				Motion:  hue.MotionSensor{Motion: true},
+				Owner:   hue.ResourceRef{RID: "device-11", RType: "device"},
+			},
+		},
+		devices: []hue.Device{
+			{ID: "device-11", Metadata: hue.Metadata{Name: "Bedroom Sensor"}},
+		},
+	}
+
+	reg := newTestRegistry(bridge)
+
+	if _, err := reg.Gather(); err != nil {
+		t.Fatalf("first gather failed: %v", err)
+	}
+
+	bridge.groupedLights = []hue.GroupedLight{
+		{
+			ID:    "group-6",
+			On:    hue.OnState{On: true},
+			Owner: hue.ResourceRef{RID: "room-4", RType: "room"},
+		},
+	}
+	bridge.rooms = append(bridge.rooms, hue.Room{ID: "room-4", Metadata: hue.Metadata{Name: "Office"}})
+	bridge.motion = []hue.Motion{
+		{
+			ID:      "motion-6",
+			Enabled: true,
+			Motion:  hue.MotionSensor{Motion: true},
+			Owner:   hue.ResourceRef{RID: "device-12", RType: "device"},
+		},
+	}
+	bridge.devices = append(bridge.devices, hue.Device{ID: "device-12", Metadata: hue.Metadata{Name: "Office Sensor"}})
+
+	if _, err := reg.Gather(); err != nil {
+		t.Fatalf("second gather failed: %v", err)
+	}
+	if _, err := reg.Gather(); err != nil {
+		t.Fatalf("third gather failed: %v", err)
+	}
+
+	if bridge.getRoomsCalls != 2 {
+		t.Fatalf("expected GetRooms to be called twice after a new room ID, got %d", bridge.getRoomsCalls)
+	}
+	if bridge.getZonesCalls != 2 {
+		t.Fatalf("expected GetZones to be called twice after a new room ID, got %d", bridge.getZonesCalls)
+	}
+	if bridge.getDevicesCalls != 2 {
+		t.Fatalf("expected GetDevices to be called twice after a new device ID, got %d", bridge.getDevicesCalls)
 	}
 }

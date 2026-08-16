@@ -12,10 +12,16 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 )
 
-const defaultTimeout = 10 * time.Second
+const (
+	defaultTimeout = 10 * time.Second
+	maxRetries     = 3
+)
+
+var retryFallbackWait = time.Second
 
 // RequestError describes a failed bridge request.
 type RequestError struct {
@@ -243,36 +249,51 @@ func CreateAppKey(bridgeIP, deviceType string, opts ClientOptions) (string, erro
 }
 
 // get fetches a CLIP v2 resource endpoint and decodes the response.
+// On HTTP 429 (Too Many Requests) it retries up to maxRetries times, honouring
+// the Retry-After header when present.
 func get[T any](c *Client, path string) ([]T, error) {
-	req, err := http.NewRequest(http.MethodGet, c.baseURL+path, nil)
-	if err != nil {
-		return nil, fmt.Errorf("creating request for %s: %w", path, err)
-	}
-	req.Header.Set("hue-application-key", c.appKey)
+	for attempt := 0; ; attempt++ {
+		req, err := http.NewRequest(http.MethodGet, c.baseURL+path, nil)
+		if err != nil {
+			return nil, fmt.Errorf("creating request for %s: %w", path, err)
+		}
+		req.Header.Set("hue-application-key", c.appKey)
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, &RequestError{Path: path, Err: err}
-	}
-	defer resp.Body.Close()
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, &RequestError{Path: path, Err: err}
+		}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, &RequestError{Path: path, Err: err}
-	}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, &RequestError{Path: path, Err: err}
+		}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, &RequestError{Path: path, StatusCode: resp.StatusCode, Err: fmt.Errorf("%s", body)}
-	}
+		if resp.StatusCode == http.StatusTooManyRequests && attempt < maxRetries {
+			wait := retryFallbackWait
+			if s := resp.Header.Get("Retry-After"); s != "" {
+				if secs, err := strconv.Atoi(s); err == nil && secs >= 0 {
+					wait = time.Duration(secs) * time.Second
+				}
+			}
+			time.Sleep(wait)
+			continue
+		}
 
-	var envelope apiResponse[T]
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return nil, fmt.Errorf("decoding response from %s: %w", path, err)
+		if resp.StatusCode != http.StatusOK {
+			return nil, &RequestError{Path: path, StatusCode: resp.StatusCode, Err: fmt.Errorf("%s", body)}
+		}
+
+		var envelope apiResponse[T]
+		if err := json.Unmarshal(body, &envelope); err != nil {
+			return nil, fmt.Errorf("decoding response from %s: %w", path, err)
+		}
+		if len(envelope.Errors) > 0 {
+			return nil, fmt.Errorf("API error from %s: %s", path, envelope.Errors[0].Description)
+		}
+		return envelope.Data, nil
 	}
-	if len(envelope.Errors) > 0 {
-		return nil, fmt.Errorf("API error from %s: %s", path, envelope.Errors[0].Description)
-	}
-	return envelope.Data, nil
 }
 
 // ---- Resource types --------------------------------------------------------
