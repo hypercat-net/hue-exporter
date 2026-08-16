@@ -145,7 +145,6 @@ func TestGet429HonoursRetryAfterHeader(t *testing.T) {
 	if sawDelay >= time.Second {
 		t.Fatalf("Retry-After header was not respected; delay was %v", sawDelay)
 	}
-	_ = sawDelay
 }
 
 func TestGet429ExhaustsRetries(t *testing.T) {

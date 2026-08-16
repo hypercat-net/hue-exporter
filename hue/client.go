@@ -252,13 +252,13 @@ func CreateAppKey(bridgeIP, deviceType string, opts ClientOptions) (string, erro
 // On HTTP 429 (Too Many Requests) it retries up to maxRetries times, honouring
 // the Retry-After header when present.
 func get[T any](c *Client, path string) ([]T, error) {
-	req, err := http.NewRequest(http.MethodGet, c.baseURL+path, nil)
-	if err != nil {
-		return nil, fmt.Errorf("creating request for %s: %w", path, err)
-	}
-	req.Header.Set("hue-application-key", c.appKey)
-
 	for attempt := 0; ; attempt++ {
+		req, err := http.NewRequest(http.MethodGet, c.baseURL+path, nil)
+		if err != nil {
+			return nil, fmt.Errorf("creating request for %s: %w", path, err)
+		}
+		req.Header.Set("hue-application-key", c.appKey)
+
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
 			return nil, &RequestError{Path: path, Err: err}
