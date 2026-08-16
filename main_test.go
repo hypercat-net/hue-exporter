@@ -123,3 +123,33 @@ func TestDiscoverBridgeIPMultipleBridges(t *testing.T) {
 		t.Fatalf("expected multiple bridges error, got: %v", err)
 	}
 }
+
+func TestRunHealthcheckSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	if err := runHealthcheck(server.URL); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+}
+
+func TestRunHealthcheckNon2xx(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	err := runHealthcheck(server.URL)
+	if err == nil || !strings.Contains(err.Error(), "unexpected status code 503") {
+		t.Fatalf("expected status code error, got: %v", err)
+	}
+}
+
+func TestRunHealthcheckRequestFailure(t *testing.T) {
+	err := runHealthcheck("://bad-url")
+	if err == nil || !strings.Contains(err.Error(), "request failed") {
+		t.Fatalf("expected request failure error, got: %v", err)
+	}
+}

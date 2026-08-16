@@ -124,6 +124,12 @@ go build -o hue-exporter .
 ```
 
 Metrics are available at `http://localhost:9366/metrics`.
+Health is available at `http://localhost:9366/healthz` (liveness endpoint).
+
+### Docker Compose example
+
+An example Compose file with a container health check is provided at
+`docker-compose.example.yml`.
 
 ## Release, image tags, and branch protection
 
@@ -151,6 +157,7 @@ Metrics are available at `http://localhost:9366/metrics`.
 |---|---|---|
 | `--config.file` | `hue_exporter.yml` | Path to config file |
 | `--web.listen-address` | `:9366` | Address to listen on |
+| `--healthcheck.target` | (empty) | Probe URL and exit with status 0 when healthy, 1 when unhealthy |
 
 ## Building
 
