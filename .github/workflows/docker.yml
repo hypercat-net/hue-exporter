@@ -77,3 +77,9 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           metadata-file: /tmp/build-metadata.json
+
+      - name: Upload build metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-metadata
+          path: /tmp/build-metadata.json
