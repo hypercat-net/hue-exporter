@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"encoding/pem"
@@ -20,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/grandcat/zeroconf"
 	"github.com/hypercat-net/hue-exporter/collector"
 	"github.com/hypercat-net/hue-exporter/hue"
 	"github.com/prometheus/client_golang/prometheus"
@@ -56,20 +58,30 @@ type bridgeStatus struct {
 }
 
 type homePageData struct {
+	// Step 1: Discovery
 	BridgeAddress         string
 	BridgeSource          string
 	BridgeDiscoveryStatus string
-	AppKeySet             bool
-	TLSCACertFile         string
-	Message               string
-	ErrorMessage          string
+	DiscoveryDone         bool
+	DiscoveryError        bool // discovery was attempted but failed (no bridge found)
+
+	// Step 2: Certificate
+	CertSaved bool
+	CertFile  string
+	CertError string
+
+	// Step 3: API Key
+	AppKeySet bool
+
+	// General feedback
+	Message      string
+	ErrorMessage string
 }
 
 type setupServer struct {
 	mu               sync.RWMutex
 	configuredBridge string
-	discoveryURL     string
-	discoveryClient  *http.Client
+	discoverer       bridgeDiscoverer
 	configPath       string
 	config           Config
 	opts             hue.ClientOptions
@@ -84,32 +96,85 @@ const (
 	hueDiscoveryURL           = "https://discovery.meethue.com/"
 	maxDiscoveryResponseBytes = 64 * 1024
 	defaultDeviceType         = "hue_exporter#server"
+	mdnsService               = "_hue._tcp"
+	mdnsDiscoveryTimeout      = 5 * time.Second
 )
 
 var homePageTemplate = template.Must(template.New("home").Parse(`<!DOCTYPE html>
 <html>
-<head><title>Hue Exporter</title></head>
+<head>
+<title>Hue Exporter Setup</title>
+<style>
+body{font-family:sans-serif;max-width:640px;margin:2em auto;padding:0 1em}
+h1{margin-bottom:1.5em}
+.step{border:1px solid #ccc;border-radius:6px;padding:1em 1.2em;margin-bottom:1em}
+.step.done{border-color:#4caf50;background:#f6fff6}
+.step.failed{border-color:#f44336;background:#fff6f6}
+.step h3{margin:0 0 0.6em;font-size:1em;text-transform:uppercase;letter-spacing:.05em;color:#555}
+.ok{color:#4caf50;font-weight:bold}
+.err{color:#f44336;font-weight:bold}
+.pending{color:#888}
+code{background:#f4f4f4;padding:0 .3em;border-radius:3px}
+input[type=text]{width:100%;box-sizing:border-box;padding:.4em;margin:.4em 0 .6em;border:1px solid #ccc;border-radius:4px}
+button{padding:.4em 1em;cursor:pointer;border-radius:4px;border:1px solid #aaa}
+button:disabled{opacity:.4;cursor:default}
+.links{margin-top:1.5em}
+</style>
+</head>
 <body>
-<h1>Hue Exporter</h1>
-{{if .Message}}<p style="color: green">{{.Message}}</p>{{end}}
-{{if .ErrorMessage}}<p style="color: red">{{.ErrorMessage}}</p>{{end}}
-<form method="post">
-  <label for="bridge-address">Bridge host/IP:</label>
-  <input id="bridge-address" name="bridge_address" type="text" value="{{.BridgeAddress}}">
-  <button type="submit" formaction="/api/bridge">Save bridge host/IP</button>
-  <button type="submit" formaction="/api/key">Generate and save API key</button>
-  <button type="submit" formaction="/api/cert">Save bridge certificate and update config</button>
-</form>
-<ul>
-  <li>Bridge host/IP: {{if .BridgeAddress}}{{.BridgeAddress}}{{else}}not available{{end}}</li>
-  <li>Bridge source: {{.BridgeSource}}</li>
-  <li>Bridge discovery status: {{if .BridgeDiscoveryStatus}}{{.BridgeDiscoveryStatus}}{{else}}not attempted{{end}}</li>
-  <li>API key set: {{if .AppKeySet}}yes{{else}}no{{end}}</li>
-  <li>Bridge certificate file: {{if .TLSCACertFile}}{{.TLSCACertFile}}{{else}}not configured{{end}}</li>
-</ul>
-<p>Press the link button on the Hue Bridge before generating a key.</p>
-<p><a href="/metrics">Metrics</a></p>
-<p><a href="/healthz">Health</a></p>
+<h1>Hue Exporter Setup</h1>
+
+{{if .Message}}<p class="ok">{{.Message}}</p>{{end}}
+{{if .ErrorMessage}}<p class="err">{{.ErrorMessage}}</p>{{end}}
+
+<!-- Step 1: Discovery -->
+<div class="step{{if .DiscoveryDone}} done{{else if .DiscoveryError}} failed{{end}}">
+  <h3>Step 1 &mdash; Bridge Discovery</h3>
+  {{if .BridgeAddress}}
+    <p><span class="ok">&#10003;</span> Bridge found at <strong>{{.BridgeAddress}}</strong> (source: {{.BridgeSource}})</p>
+    {{if .BridgeDiscoveryStatus}}<p><small>{{.BridgeDiscoveryStatus}}</small></p>{{end}}
+  {{else}}
+    <p><span class="err">&#10007;</span> Bridge not found{{if .BridgeDiscoveryStatus}}: {{.BridgeDiscoveryStatus}}{{end}}</p>
+    <p class="pending">Discovery tries mDNS (<code>_hue._tcp</code>) first, then <code>discovery.meethue.com</code>. If both fail, enter the bridge IP manually below.</p>
+  {{end}}
+  <form method="post" action="/api/bridge">
+    <label>Bridge host/IP (leave blank to use discovered address):</label>
+    <input type="text" name="bridge_address" value="{{.BridgeAddress}}" placeholder="e.g. 192.168.1.2 or bridge.local">
+    <button type="submit">Save bridge host/IP</button>
+  </form>
+</div>
+
+<!-- Step 2: Certificate -->
+<div class="step{{if .CertSaved}} done{{else if .CertError}} failed{{end}}">
+  <h3>Step 2 &mdash; Bridge Certificate</h3>
+  {{if .CertSaved}}
+    <p><span class="ok">&#10003;</span> Certificate saved: <code>{{.CertFile}}</code></p>
+  {{else if .CertError}}
+    <p><span class="err">&#10007;</span> {{.CertError}}</p>
+    <p class="pending">The certificate will be fetched automatically when the bridge becomes reachable. Reload this page to retry.</p>
+  {{else if .DiscoveryDone}}
+    <p class="pending">Fetching certificate&hellip;</p>
+  {{else}}
+    <p class="pending">Waiting for bridge discovery.</p>
+  {{end}}
+</div>
+
+<!-- Step 3: API Key -->
+<div class="step{{if .AppKeySet}} done{{end}}">
+  <h3>Step 3 &mdash; API Key</h3>
+  {{if .AppKeySet}}
+    <p><span class="ok">&#10003;</span> API key is set.</p>
+  {{else}}
+    <p>Press the <strong>link button</strong> on your Hue Bridge, then click Generate.</p>
+  {{end}}
+  <form method="post" action="/api/key">
+    <button type="submit"{{if not .DiscoveryDone}} disabled{{end}}>Generate and save API key</button>
+  </form>
+</div>
+
+<div class="links">
+  <a href="/metrics">Metrics</a> &nbsp;|&nbsp; <a href="/healthz">Health</a>
+</div>
 </body>
 </html>
 `))
@@ -174,26 +239,56 @@ type discoveredBridge struct {
 	InternalIPAddress string `json:"internalipaddress"`
 }
 
-func discoverBridgeIP(client *http.Client, discoveryURL string) (string, error) {
-	bridges, err := discoverBridges(client, discoveryURL)
+// bridgeDiscoverer is the interface used to locate Hue bridges on the network.
+// It is satisfied by discoverBridgesMDNS and discoverBridgesHTTP, and can be
+// replaced in tests with a fake implementation.
+type bridgeDiscoverer func() ([]discoveredBridge, error)
+
+// discoverBridgesMDNS browses for _hue._tcp mDNS/DNS-SD services and returns
+// any Hue bridges found on the local network. It is the preferred discovery
+// method because it works entirely on the local network without relying on an
+// external cloud endpoint.
+func discoverBridgesMDNS() ([]discoveredBridge, error) {
+	resolver, err := zeroconf.NewResolver(nil)
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("creating mDNS resolver: %w", err)
 	}
 
-	switch len(bridges) {
-	case 0:
-		return "", fmt.Errorf("no Hue bridges discovered; set bridge_ip in config")
-	case 1:
-		if bridges[0].InternalIPAddress == "" {
-			return "", fmt.Errorf("Hue discovery response missing internal IP address")
-		}
-		return bridges[0].InternalIPAddress, nil
-	default:
-		return "", fmt.Errorf("discovered %d Hue bridges (%s); set bridge_ip in config", len(bridges), joinDiscoveryBridgeIPs(bridges))
+	entries := make(chan *zeroconf.ServiceEntry)
+	ctx, cancel := context.WithTimeout(context.Background(), mdnsDiscoveryTimeout)
+	defer cancel()
+
+	if err := resolver.Browse(ctx, mdnsService, "local.", entries); err != nil {
+		return nil, fmt.Errorf("browsing mDNS for %s: %w", mdnsService, err)
 	}
+
+	var bridges []discoveredBridge
+	for entry := range entries {
+		var ip string
+		for _, addr := range entry.AddrIPv4 {
+			ip = addr.String()
+			break
+		}
+		if ip == "" {
+			for _, addr := range entry.AddrIPv6 {
+				ip = addr.String()
+				break
+			}
+		}
+		if ip == "" {
+			continue
+		}
+		bridges = append(bridges, discoveredBridge{
+			ID:                entry.ServiceRecord.Instance,
+			InternalIPAddress: ip,
+		})
+	}
+	return bridges, nil
 }
 
-func discoverBridges(client *http.Client, discoveryURL string) ([]discoveredBridge, error) {
+// discoverBridgesHTTP queries the Hue cloud discovery endpoint and returns the
+// list of bridges it reports. This is the fallback when mDNS finds nothing.
+func discoverBridgesHTTP(client *http.Client, discoveryURL string) ([]discoveredBridge, error) {
 	resp, err := client.Get(discoveryURL)
 	if err != nil {
 		return nil, fmt.Errorf("discovering Hue bridges: %w", err)
@@ -217,6 +312,18 @@ func discoverBridges(client *http.Client, discoveryURL string) ([]discoveredBrid
 	return bridges, nil
 }
 
+// discoverBridges tries mDNS first and falls back to the HTTP cloud endpoint
+// when mDNS finds no bridges. The mdns and httpFallback parameters allow
+// callers (and tests) to inject alternative implementations.
+func discoverBridges(mdns bridgeDiscoverer, httpFallback bridgeDiscoverer) ([]discoveredBridge, error) {
+	bridges, err := mdns()
+	if err == nil && len(bridges) > 0 {
+		return bridges, nil
+	}
+
+	return httpFallback()
+}
+
 func joinDiscoveryBridgeIPs(bridges []discoveredBridge) string {
 	ips := make([]string, 0, len(bridges))
 	for _, bridge := range bridges {
@@ -229,8 +336,50 @@ func joinDiscoveryBridgeIPs(bridges []discoveredBridge) string {
 	return strings.Join(ips, ", ")
 }
 
-func discoverBridgeStatus(client *http.Client, discoveryURL string) bridgeStatus {
-	bridges, err := discoverBridges(client, discoveryURL)
+// makeDiscoverer constructs a bridgeDiscoverer that tries mDNS first and falls
+// back to the Hue HTTP cloud endpoint. mdnsFn is the mDNS implementation to
+// use; pass discoverBridgesMDNS for production and a no-op stub for tests.
+func makeDiscoverer(mdnsFn bridgeDiscoverer, client *http.Client, discoveryURL string) bridgeDiscoverer {
+	return func() ([]discoveredBridge, error) {
+		return discoverBridges(mdnsFn, func() ([]discoveredBridge, error) {
+			return discoverBridgesHTTP(client, discoveryURL)
+		})
+	}
+}
+
+// makeHTTPOnlyDiscoverer returns a discoverer that queries only the HTTP cloud
+// endpoint, skipping mDNS entirely. Use this in tests to avoid multicast
+// timeouts that would otherwise slow down the test suite.
+func makeHTTPOnlyDiscoverer(client *http.Client, discoveryURL string) bridgeDiscoverer {
+	return func() ([]discoveredBridge, error) {
+		return discoverBridgesHTTP(client, discoveryURL)
+	}
+}
+
+// discoverBridgeIP resolves a bridge IP using only the HTTP cloud endpoint.
+// It is intended for callers that already have an HTTP client and discovery URL
+// and do not need the mDNS-first behaviour of the full discovery stack.
+func discoverBridgeIP(client *http.Client, discoveryURL string) (string, error) {
+	bridges, err := discoverBridgesHTTP(client, discoveryURL)
+	if err != nil {
+		return "", err
+	}
+
+	switch len(bridges) {
+	case 0:
+		return "", fmt.Errorf("no Hue bridges discovered; set bridge_ip in config")
+	case 1:
+		if bridges[0].InternalIPAddress == "" {
+			return "", fmt.Errorf("Hue discovery response missing internal IP address")
+		}
+		return bridges[0].InternalIPAddress, nil
+	default:
+		return "", fmt.Errorf("discovered %d Hue bridges (%s); set bridge_ip in config", len(bridges), joinDiscoveryBridgeIPs(bridges))
+	}
+}
+
+func discoverBridgeStatus(discoverer bridgeDiscoverer) bridgeStatus {
+	bridges, err := discoverer()
 	if err != nil {
 		return bridgeStatus{
 			Source:          "discovered",
@@ -271,7 +420,7 @@ func discoverBridgeStatus(client *http.Client, discoveryURL string) bridgeStatus
 	}
 }
 
-func resolveBridgeStatus(client *http.Client, configuredBridge, discoveryURL string) bridgeStatus {
+func resolveBridgeStatus(discoverer bridgeDiscoverer, configuredBridge string) bridgeStatus {
 	if configuredBridge != "" {
 		return bridgeStatus{
 			Address: configuredBridge,
@@ -279,10 +428,10 @@ func resolveBridgeStatus(client *http.Client, configuredBridge, discoveryURL str
 		}
 	}
 
-	return discoverBridgeStatus(client, discoveryURL)
+	return discoverBridgeStatus(discoverer)
 }
 
-func resolveBridgeStatusWithPersisted(client *http.Client, configuredBridge, persistedBridge, discoveryURL string) bridgeStatus {
+func resolveBridgeStatusWithPersisted(discoverer bridgeDiscoverer, configuredBridge, persistedBridge string) bridgeStatus {
 	if configuredBridge != "" {
 		return bridgeStatus{
 			Address: configuredBridge,
@@ -295,7 +444,7 @@ func resolveBridgeStatusWithPersisted(client *http.Client, configuredBridge, per
 			Source:  "persisted",
 		}
 	}
-	return resolveBridgeStatus(client, "", discoveryURL)
+	return resolveBridgeStatus(discoverer, "")
 }
 
 func runHealthcheck(target string) error {
@@ -332,10 +481,17 @@ func newMetricsHandler(bridge hue.Bridge) http.Handler {
 }
 
 func newSetupServer(cfg *Config, configPath string, opts hue.ClientOptions, discoveryURL string) (*setupServer, error) {
+	discoverer := makeDiscoverer(discoverBridgesMDNS, &http.Client{Timeout: 10 * time.Second}, discoveryURL)
+	return newSetupServerWithDiscoverer(cfg, configPath, opts, discoverer)
+}
+
+// newSetupServerWithDiscoverer creates a setup server with a caller-supplied
+// bridgeDiscoverer. Use this in tests to inject an HTTP-only discoverer
+// (via makeHTTPOnlyDiscoverer) so that mDNS timeouts do not slow tests down.
+func newSetupServerWithDiscoverer(cfg *Config, configPath string, opts hue.ClientOptions, discoverer bridgeDiscoverer) (*setupServer, error) {
 	srv := &setupServer{
 		configuredBridge: cfg.BridgeIP,
-		discoveryURL:     discoveryURL,
-		discoveryClient:  &http.Client{Timeout: 10 * time.Second},
+		discoverer:       discoverer,
 		configPath:       configPath,
 		config:           *cfg,
 		opts:             opts,
@@ -348,7 +504,7 @@ func newSetupServer(cfg *Config, configPath string, opts hue.ClientOptions, disc
 		srv.mu.RUnlock()
 		return hue.CreateAppKey(bridgeAddress, defaultDeviceType, currentOpts)
 	}
-	srv.bridge = resolveBridgeStatusWithPersisted(srv.discoveryClient, cfg.BridgeIP, cfg.State.BridgeIP, discoveryURL)
+	srv.bridge = resolveBridgeStatusWithPersisted(discoverer, cfg.BridgeIP, cfg.State.BridgeIP)
 
 	appKey := cfg.AppKey
 	if appKey == "" {
@@ -454,7 +610,7 @@ func (s *setupServer) ensureBridgeStatus() (bridgeStatus, error) {
 		return s.bridge, nil
 	}
 
-	resolved := resolveBridgeStatus(s.discoveryClient, "", s.discoveryURL)
+	resolved := resolveBridgeStatus(s.discoverer, "")
 	s.bridge = resolved
 	if resolved.Address != "" {
 		if err := s.persistBridgeIPLocked(resolved.Address); err != nil {
@@ -515,7 +671,7 @@ func (s *setupServer) rediscoverBridge() (bridgeStatus, error) {
 		return s.bridge, nil
 	}
 
-	resolved := resolveBridgeStatus(s.discoveryClient, "", s.discoveryURL)
+	resolved := resolveBridgeStatus(s.discoverer, "")
 	if resolved.Address == "" {
 		if s.bridge.Address != "" {
 			s.bridge.Error = resolved.Error
@@ -696,7 +852,7 @@ func (s *setupServer) GetButtons() ([]hue.Button, error) {
 	})
 }
 
-func (s *setupServer) pageData(message, errorMessage string) homePageData {
+func (s *setupServer) pageData(message, errorMessage, certError string) homePageData {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -704,16 +860,24 @@ func (s *setupServer) pageData(message, errorMessage string) homePageData {
 		BridgeAddress:         s.bridge.Address,
 		BridgeSource:          s.bridge.Source,
 		BridgeDiscoveryStatus: s.bridge.DiscoveryStatus,
+		DiscoveryDone:         s.bridge.Address != "",
+		DiscoveryError:        s.bridge.Address == "" && s.bridge.Error != "",
+		CertSaved:             s.config.TLSCACertFile != "",
+		CertFile:              s.config.TLSCACertFile,
+		CertError:             certError,
 		AppKeySet:             s.appKey != "",
-		TLSCACertFile:         s.config.TLSCACertFile,
 		Message:               message,
 		ErrorMessage:          errorMessage,
 	}
 }
 
 func (s *setupServer) renderHome(w http.ResponseWriter, message, errorMessage string) {
+	s.renderHomeWithCertError(w, message, errorMessage, "")
+}
+
+func (s *setupServer) renderHomeWithCertError(w http.ResponseWriter, message, errorMessage, certError string) {
 	var buf bytes.Buffer
-	if err := homePageTemplate.Execute(&buf, s.pageData(message, errorMessage)); err != nil {
+	if err := homePageTemplate.Execute(&buf, s.pageData(message, errorMessage, certError)); err != nil {
 		http.Error(w, fmt.Sprintf("rendering home page: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -731,7 +895,26 @@ func (s *setupServer) handleHome(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	s.renderHome(w, "", "")
+
+	// Auto-fetch and save the bridge certificate whenever a bridge is known but
+	// no cert has been saved yet. This runs on every page load so that a
+	// transient network error is retried the next time the user visits.
+	s.mu.RLock()
+	bridgeAddr := s.bridge.Address
+	certSaved := s.config.TLSCACertFile != ""
+	s.mu.RUnlock()
+
+	var certError string
+	if bridgeAddr != "" && !certSaved {
+		certPEM, err := s.fetchBridgeCert(bridgeAddr)
+		if err != nil {
+			certError = fmt.Sprintf("could not fetch bridge certificate: %v", err)
+		} else if err := s.persistBridgeCertificate(certPEM); err != nil {
+			certError = fmt.Sprintf("could not save bridge certificate: %v", err)
+		}
+	}
+
+	s.renderHomeWithCertError(w, "", "", certError)
 }
 
 func (s *setupServer) handleGenerateAppKey(w http.ResponseWriter, r *http.Request) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -9,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/hypercat-net/hue-exporter/hue"
 )
@@ -253,6 +253,10 @@ func TestHomePageShowsBridgeAndAppKeyStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newSetupServer returned error: %v", err)
 	}
+	// Stub cert fetch so the auto-fetch in handleHome doesn't make a real TLS connection.
+	server.fetchBridgeCert = func(string) ([]byte, error) {
+		return nil, fmt.Errorf("stub: not available in test")
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
@@ -262,14 +266,14 @@ func TestHomePageShowsBridgeAndAppKeyStatus(t *testing.T) {
 		t.Fatalf("unexpected status: %d", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "Bridge host/IP: bridge.local") {
+	if !strings.Contains(body, "bridge.local") {
 		t.Fatalf("expected bridge address in page, got: %s", body)
 	}
-	if !strings.Contains(body, "API key set: no") {
-		t.Fatalf("expected missing app key status, got: %s", body)
+	if !strings.Contains(body, "Generate and save API key") {
+		t.Fatalf("expected API key button in page, got: %s", body)
 	}
-	if !strings.Contains(body, "Bridge certificate file: not configured") {
-		t.Fatalf("expected certificate status, got: %s", body)
+	if !strings.Contains(body, "Step 2") {
+		t.Fatalf("expected certificate step in page, got: %s", body)
 	}
 }
 
@@ -313,7 +317,7 @@ func TestNewSetupServerPersistsDiscoveredBridgeIP(t *testing.T) {
 	defer discovery.Close()
 
 	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
-	server, err := newSetupServer(&Config{}, configPath, hue.ClientOptions{}, discovery.URL)
+	server, err := newSetupServerWithDiscoverer(&Config{}, configPath, hue.ClientOptions{}, makeHTTPOnlyDiscoverer(discovery.Client(), discovery.URL))
 	if err != nil {
 		t.Fatalf("newSetupServer returned error: %v", err)
 	}
@@ -354,7 +358,7 @@ func TestGenerateAppKeyPersistsState(t *testing.T) {
 	if !strings.Contains(body, "API key generated and saved.") {
 		t.Fatalf("expected success message, got: %s", body)
 	}
-	if !strings.Contains(body, "API key set: yes") {
+	if !strings.Contains(body, "API key is set.") {
 		t.Fatalf("expected app key status, got: %s", body)
 	}
 
@@ -585,7 +589,7 @@ func TestGetLightsRediscoveryUpdatesPersistedBridgeIP(t *testing.T) {
 	defer discovery.Close()
 
 	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
-	server, err := newSetupServer(&Config{AppKey: "saved-key", TLSInsecureSkipVerify: true}, configPath, hue.ClientOptions{InsecureSkipVerify: true}, discovery.URL)
+	server, err := newSetupServerWithDiscoverer(&Config{AppKey: "saved-key", TLSInsecureSkipVerify: true}, configPath, hue.ClientOptions{InsecureSkipVerify: true}, makeHTTPOnlyDiscoverer(discovery.Client(), discovery.URL))
 	if err != nil {
 		t.Fatalf("newSetupServer returned error: %v", err)
 	}
@@ -655,14 +659,21 @@ func TestBuildClientOptions(t *testing.T) {
 }
 
 func TestResolveBridgeStatusConfigured(t *testing.T) {
-	got := resolveBridgeStatus(&http.Client{}, "bridge.local", "https://unused.local")
+	neverCalled := func() ([]discoveredBridge, error) {
+		t.Fatal("discoverer should not be called when bridge is configured")
+		return nil, nil
+	}
+	got := resolveBridgeStatus(neverCalled, "bridge.local")
 	if got.Address != "bridge.local" || got.Source != "configured" || got.Error != "" {
 		t.Fatalf("unexpected bridge status: %+v", got)
 	}
 }
 
 func TestResolveBridgeStatusDiscoveryError(t *testing.T) {
-	got := resolveBridgeStatus(&http.Client{Timeout: 100 * time.Millisecond}, "", "http://127.0.0.1:1")
+	failing := func() ([]discoveredBridge, error) {
+		return nil, fmt.Errorf("connection refused")
+	}
+	got := resolveBridgeStatus(failing, "")
 	if got.Address != "" {
 		t.Fatalf("expected empty address, got: %q", got.Address)
 	}
@@ -683,10 +694,9 @@ func TestEnsureBridgeStatusDiscoversAndPersists(t *testing.T) {
 
 	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
 	server := &setupServer{
-		discoveryClient: discovery.Client(),
-		discoveryURL:    discovery.URL,
-		configPath:      configPath,
-		config:          Config{},
+		discoverer: makeHTTPOnlyDiscoverer(discovery.Client(), discovery.URL),
+		configPath: configPath,
+		config:     Config{},
 	}
 
 	bridge, err := server.ensureBridgeStatus()
@@ -810,7 +820,7 @@ func TestHandleGenerateAppKeyBridgeUnavailable(t *testing.T) {
 	defer discovery.Close()
 
 	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
-	server, err := newSetupServer(&Config{}, configPath, hue.ClientOptions{}, discovery.URL)
+	server, err := newSetupServerWithDiscoverer(&Config{}, configPath, hue.ClientOptions{}, makeHTTPOnlyDiscoverer(discovery.Client(), discovery.URL))
 	if err != nil {
 		t.Fatalf("newSetupServer returned error: %v", err)
 	}
@@ -833,7 +843,7 @@ func TestHandleGenerateAppKeyUsesSubmittedBridgeAddress(t *testing.T) {
 	defer discovery.Close()
 
 	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
-	server, err := newSetupServer(&Config{}, configPath, hue.ClientOptions{}, discovery.URL)
+	server, err := newSetupServerWithDiscoverer(&Config{}, configPath, hue.ClientOptions{}, makeHTTPOnlyDiscoverer(discovery.Client(), discovery.URL))
 	if err != nil {
 		t.Fatalf("newSetupServer returned error: %v", err)
 	}
@@ -856,7 +866,7 @@ func TestHandleGenerateAppKeyUsesSubmittedBridgeAddress(t *testing.T) {
 	if !strings.Contains(body, "API key generated and saved.") {
 		t.Fatalf("unexpected body: %s", body)
 	}
-	if !strings.Contains(body, "Bridge host/IP: 192.168.1.20") {
+	if !strings.Contains(body, "192.168.1.20") {
 		t.Fatalf("unexpected body: %s", body)
 	}
 
@@ -873,8 +883,14 @@ func TestHandleGenerateAppKeyUsesSubmittedBridgeAddress(t *testing.T) {
 }
 
 func TestHandleSaveBridgeAddressPersistsConfiguredBridge(t *testing.T) {
+	discovery := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer discovery.Close()
+
 	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
-	server, err := newSetupServer(&Config{}, configPath, hue.ClientOptions{}, hueDiscoveryURL)
+	server, err := newSetupServerWithDiscoverer(&Config{}, configPath, hue.ClientOptions{}, makeHTTPOnlyDiscoverer(discovery.Client(), discovery.URL))
 	if err != nil {
 		t.Fatalf("newSetupServer returned error: %v", err)
 	}
@@ -891,7 +907,7 @@ func TestHandleSaveBridgeAddressPersistsConfiguredBridge(t *testing.T) {
 	if !strings.Contains(body, "Bridge host/IP saved: 192.168.1.30.") {
 		t.Fatalf("unexpected body: %s", body)
 	}
-	if !strings.Contains(body, "Bridge source: configured") {
+	if !strings.Contains(body, "source: configured") {
 		t.Fatalf("unexpected body: %s", body)
 	}
 
@@ -936,7 +952,7 @@ func TestHandleSaveBridgeCertificateBridgeUnavailable(t *testing.T) {
 	defer discovery.Close()
 
 	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
-	server, err := newSetupServer(&Config{}, configPath, hue.ClientOptions{}, discovery.URL)
+	server, err := newSetupServerWithDiscoverer(&Config{}, configPath, hue.ClientOptions{}, makeHTTPOnlyDiscoverer(discovery.Client(), discovery.URL))
 	if err != nil {
 		t.Fatalf("newSetupServer returned error: %v", err)
 	}
@@ -977,8 +993,7 @@ func TestRediscoverBridgeKeepsPreviousAddressWhenDiscoveryFails(t *testing.T) {
 	defer discovery.Close()
 
 	server := &setupServer{
-		discoveryClient: discovery.Client(),
-		discoveryURL:    discovery.URL,
+		discoverer: makeHTTPOnlyDiscoverer(discovery.Client(), discovery.URL),
 		bridge: bridgeStatus{
 			Address: "bridge.local",
 			Source:  "persisted",
@@ -1001,5 +1016,194 @@ func TestFetchBridgeCertificatePEMConnectionError(t *testing.T) {
 	_, err := fetchBridgeCertificatePEM("127.0.0.1:1")
 	if err == nil || !strings.Contains(err.Error(), "connecting to bridge TLS endpoint") {
 		t.Fatalf("expected connection error, got: %v", err)
+	}
+}
+
+func TestHomePageAutoFetchesCertWhenBridgeKnown(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
+	server, err := newSetupServer(&Config{BridgeIP: "bridge.local"}, configPath, hue.ClientOptions{}, hueDiscoveryURL)
+	if err != nil {
+		t.Fatalf("newSetupServer returned error: %v", err)
+	}
+	wantPEM := []byte("-----BEGIN CERTIFICATE-----\nZmFrZS1jZXJ0\n-----END CERTIFICATE-----\n")
+	server.fetchBridgeCert = func(addr string) ([]byte, error) {
+		if addr != "bridge.local" {
+			t.Fatalf("unexpected bridge address for cert fetch: %q", addr)
+		}
+		return wantPEM, nil
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	newMux(server, true).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Certificate saved") {
+		t.Fatalf("expected cert saved status in page, got: %s", body)
+	}
+
+	// Cert should be persisted in config.
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.TLSCACertFile == "" {
+		t.Fatal("expected TLSCACertFile to be set after auto-fetch")
+	}
+}
+
+func TestHomePageShowsCertErrorWhenFetchFails(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
+	server, err := newSetupServer(&Config{BridgeIP: "bridge.local"}, configPath, hue.ClientOptions{}, hueDiscoveryURL)
+	if err != nil {
+		t.Fatalf("newSetupServer returned error: %v", err)
+	}
+	server.fetchBridgeCert = func(string) ([]byte, error) {
+		return nil, fmt.Errorf("dial tcp: connection refused")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	newMux(server, true).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "could not fetch bridge certificate") {
+		t.Fatalf("expected cert error in page, got: %s", body)
+	}
+}
+
+func TestHomePageSkipsCertFetchWhenAlreadySaved(t *testing.T) {
+	certPath := filepath.Join(t.TempDir(), "bridge-ca.pem")
+	if err := os.WriteFile(certPath, []byte("fake-pem"), 0o600); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
+	server, err := newSetupServer(&Config{BridgeIP: "bridge.local", TLSCACertFile: certPath}, configPath, hue.ClientOptions{}, hueDiscoveryURL)
+	if err != nil {
+		t.Fatalf("newSetupServer returned error: %v", err)
+	}
+	fetchCalled := false
+	server.fetchBridgeCert = func(string) ([]byte, error) {
+		fetchCalled = true
+		return nil, fmt.Errorf("should not be called")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	newMux(server, true).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+	if fetchCalled {
+		t.Fatal("fetchBridgeCert should not be called when cert is already saved")
+	}
+	if !strings.Contains(rec.Body.String(), "Certificate saved") {
+		t.Fatalf("expected cert saved status, got: %s", rec.Body.String())
+	}
+}
+
+func TestHomePageNoCertFetchWhenNoBridge(t *testing.T) {
+	discovery := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer discovery.Close()
+
+	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
+	server, err := newSetupServerWithDiscoverer(&Config{}, configPath, hue.ClientOptions{}, makeHTTPOnlyDiscoverer(discovery.Client(), discovery.URL))
+	if err != nil {
+		t.Fatalf("newSetupServer returned error: %v", err)
+	}
+	fetchCalled := false
+	server.fetchBridgeCert = func(string) ([]byte, error) {
+		fetchCalled = true
+		return nil, fmt.Errorf("should not be called")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	newMux(server, true).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+	if fetchCalled {
+		t.Fatal("fetchBridgeCert should not be called when bridge is not known")
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Waiting for bridge discovery") {
+		t.Fatalf("expected waiting-for-discovery message, got: %s", body)
+	}
+}
+
+func TestDiscoverBridgesPrefersMDNS(t *testing.T) {
+	mdnsCalled := false
+	httpCalled := false
+
+	mdns := func() ([]discoveredBridge, error) {
+		mdnsCalled = true
+		return []discoveredBridge{{ID: "mdns-bridge", InternalIPAddress: "192.168.1.10"}}, nil
+	}
+	httpFallback := func() ([]discoveredBridge, error) {
+		httpCalled = true
+		return []discoveredBridge{{ID: "http-bridge", InternalIPAddress: "192.168.1.20"}}, nil
+	}
+
+	bridges, err := discoverBridges(mdns, httpFallback)
+	if err != nil {
+		t.Fatalf("discoverBridges returned error: %v", err)
+	}
+	if !mdnsCalled {
+		t.Fatal("expected mDNS discoverer to be called")
+	}
+	if httpCalled {
+		t.Fatal("expected HTTP discoverer NOT to be called when mDNS succeeds")
+	}
+	if len(bridges) != 1 || bridges[0].ID != "mdns-bridge" {
+		t.Fatalf("unexpected bridges: %+v", bridges)
+	}
+}
+
+func TestDiscoverBridgesFallsBackToHTTPWhenMDNSEmpty(t *testing.T) {
+	mdns := func() ([]discoveredBridge, error) { return nil, nil }
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"http-bridge","internalipaddress":"192.168.1.20"}]`))
+	}))
+	defer httpServer.Close()
+
+	discoverer := makeHTTPOnlyDiscoverer(httpServer.Client(), httpServer.URL)
+	// Wrap in discoverBridges with empty mDNS to test the fallback path.
+	bridges, err := discoverBridges(mdns, discoverer)
+	if err != nil {
+		t.Fatalf("discoverBridges returned error: %v", err)
+	}
+	if len(bridges) != 1 || bridges[0].ID != "http-bridge" {
+		t.Fatalf("unexpected bridges: %+v", bridges)
+	}
+}
+
+func TestDiscoverBridgesFallsBackToHTTPWhenMDNSErrors(t *testing.T) {
+	mdns := func() ([]discoveredBridge, error) { return nil, fmt.Errorf("mDNS unavailable") }
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"http-bridge","internalipaddress":"192.168.1.21"}]`))
+	}))
+	defer httpServer.Close()
+
+	discoverer := makeHTTPOnlyDiscoverer(httpServer.Client(), httpServer.URL)
+	bridges, err := discoverBridges(mdns, discoverer)
+	if err != nil {
+		t.Fatalf("discoverBridges returned error: %v", err)
+	}
+	if len(bridges) != 1 || bridges[0].InternalIPAddress != "192.168.1.21" {
+		t.Fatalf("unexpected bridges: %+v", bridges)
 	}
 }
