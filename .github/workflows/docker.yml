@@ -76,4 +76,3 @@ jobs:
           # Use GitHub Actions cache to speed up subsequent builds
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          outputs: -
