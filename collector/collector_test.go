@@ -187,6 +187,12 @@ func TestGroupedLight(t *testing.T) {
 				Owner:   hue.ResourceRef{RID: "room-1", RType: "room"},
 			},
 		},
+		rooms: []hue.Room{
+			{
+				ID:       "room-1",
+				Metadata: hue.Metadata{Name: "Living Room"},
+			},
+		},
 	}
 
 	reg := newTestRegistry(bridge)
@@ -194,7 +200,7 @@ func TestGroupedLight(t *testing.T) {
 	expected := `
 # HELP hue_grouped_light_on Whether any light in the group is on (1) or all are off (0).
 # TYPE hue_grouped_light_on gauge
-hue_grouped_light_on{id="group-1",owner_id="room-1",owner_type="room"} 1
+hue_grouped_light_on{id="group-1",owner_id="room-1",owner_name="Living Room",owner_type="room"} 1
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_grouped_light_on"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
@@ -347,6 +353,12 @@ func TestDeviceBattery(t *testing.T) {
 				Owner: hue.ResourceRef{RID: "device-6", RType: "device"},
 			},
 		},
+		devices: []hue.Device{
+			{
+				ID:       "device-6",
+				Metadata: hue.Metadata{Name: "Hall Sensor"},
+			},
+		},
 	}
 
 	reg := newTestRegistry(bridge)
@@ -354,7 +366,7 @@ func TestDeviceBattery(t *testing.T) {
 	expected := `
 # HELP hue_device_battery_level_percent Battery level of the device as a percentage (0–100).
 # TYPE hue_device_battery_level_percent gauge
-hue_device_battery_level_percent{id="dp-1",owner_id="device-6"} 85
+hue_device_battery_level_percent{id="dp-1",owner_id="device-6",owner_name="Hall Sensor"} 85
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_device_battery_level_percent"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
