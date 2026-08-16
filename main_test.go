@@ -266,6 +266,9 @@ func TestHomePageShowsBridgeAndAppKeyStatus(t *testing.T) {
 	if !strings.Contains(body, "API key set: no") {
 		t.Fatalf("expected missing app key status, got: %s", body)
 	}
+	if !strings.Contains(body, "Bridge certificate file: not configured") {
+		t.Fatalf("expected certificate status, got: %s", body)
+	}
 }
 
 func TestNewSetupServerUsesPersistedBridgeIP(t *testing.T) {
@@ -378,6 +381,74 @@ func TestGenerateAppKeyMethodNotAllowed(t *testing.T) {
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+}
+
+func TestSaveBridgeCertificateMethodNotAllowed(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
+	server, err := newSetupServer(&Config{BridgeIP: "bridge.local"}, configPath, hue.ClientOptions{}, hueDiscoveryURL)
+	if err != nil {
+		t.Fatalf("newSetupServer returned error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/cert", nil)
+	rec := httptest.NewRecorder()
+	newMux(server).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+}
+
+func TestSaveBridgeCertificatePersistsConfig(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
+	server, err := newSetupServer(&Config{BridgeIP: "bridge.local", TLSInsecureSkipVerify: true}, configPath, hue.ClientOptions{InsecureSkipVerify: true}, hueDiscoveryURL)
+	if err != nil {
+		t.Fatalf("newSetupServer returned error: %v", err)
+	}
+	wantPEM := []byte("-----BEGIN CERTIFICATE-----\nZmFrZS1jZXJ0\n-----END CERTIFICATE-----\n")
+	server.fetchBridgeCert = func(bridgeAddress string) ([]byte, error) {
+		if bridgeAddress != "bridge.local" {
+			t.Fatalf("unexpected bridge address: %q", bridgeAddress)
+		}
+		return wantPEM, nil
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/cert", nil)
+	rec := httptest.NewRecorder()
+	newMux(server).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Bridge certificate saved and config updated.") {
+		t.Fatalf("expected success message, got: %s", body)
+	}
+
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadConfig returned error: %v", err)
+	}
+	wantCertPath := filepath.Join(filepath.Dir(configPath), "bridge-ca.pem")
+	if cfg.TLSCACertFile != wantCertPath {
+		t.Fatalf("unexpected tls_ca_cert_file: %q", cfg.TLSCACertFile)
+	}
+	if cfg.TLSInsecureSkipVerify {
+		t.Fatal("expected tls_insecure_skip_verify to be false")
+	}
+	gotPEM, err := os.ReadFile(wantCertPath)
+	if err != nil {
+		t.Fatalf("read saved cert file: %v", err)
+	}
+	if string(gotPEM) != string(wantPEM) {
+		t.Fatalf("unexpected cert file contents: %q", string(gotPEM))
+	}
+	if server.opts.InsecureSkipVerify {
+		t.Fatal("expected runtime insecure-skip-verify to be false")
+	}
+	if string(server.opts.CACert) != string(wantPEM) {
+		t.Fatalf("unexpected runtime cert contents: %q", string(server.opts.CACert))
 	}
 }
 

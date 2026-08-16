@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
 	"html/template"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -53,6 +56,7 @@ type homePageData struct {
 	BridgeSource  string
 	BridgeError   string
 	AppKeySet     bool
+	TLSCACertFile string
 	Message       string
 	ErrorMessage  string
 }
@@ -66,6 +70,7 @@ type setupServer struct {
 	config           Config
 	opts             hue.ClientOptions
 	createAppKey     func(string) (string, error)
+	fetchBridgeCert  func(string) ([]byte, error)
 	bridge           bridgeStatus
 	appKey           string
 	metricsHandler   http.Handler
@@ -89,9 +94,13 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!DOCTYPE html>
   <li>Bridge source: {{.BridgeSource}}</li>
   <li>Bridge discovery status: {{if .BridgeError}}{{.BridgeError}}{{else}}ok{{end}}</li>
   <li>API key set: {{if .AppKeySet}}yes{{else}}no{{end}}</li>
+  <li>Bridge certificate file: {{if .TLSCACertFile}}{{.TLSCACertFile}}{{else}}not configured{{end}}</li>
 </ul>
 <form method="post" action="/api/key">
   <button type="submit">Generate and save API key</button>
+</form>
+<form method="post" action="/api/cert">
+  <button type="submit">Save bridge certificate and update config</button>
 </form>
 <p>Press the link button on the Hue Bridge before generating a key.</p>
 <p><a href="/metrics">Metrics</a></p>
@@ -99,6 +108,35 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!DOCTYPE html>
 </body>
 </html>
 `))
+
+func fetchBridgeCertificatePEM(bridgeAddress string) ([]byte, error) {
+	target := bridgeAddress
+	if _, _, err := net.SplitHostPort(target); err != nil {
+		target = net.JoinHostPort(target, "443")
+	}
+
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", target, &tls.Config{ //nolint:gosec // Required to fetch self-signed bridge cert.
+		InsecureSkipVerify: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("connecting to bridge TLS endpoint: %w", err)
+	}
+	defer conn.Close()
+
+	peerCerts := conn.ConnectionState().PeerCertificates
+	if len(peerCerts) == 0 {
+		return nil, fmt.Errorf("bridge TLS endpoint did not provide certificates")
+	}
+
+	var pemData []byte
+	for _, cert := range peerCerts {
+		pemData = append(pemData, pem.EncodeToMemory(&pem.Block{
+			Type:  "CERTIFICATE",
+			Bytes: cert.Raw,
+		})...)
+	}
+	return pemData, nil
+}
 
 func loadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -245,10 +283,14 @@ func newSetupServer(cfg *Config, configPath string, opts hue.ClientOptions, disc
 		configPath:       configPath,
 		config:           *cfg,
 		opts:             opts,
-		createAppKey: func(bridgeAddress string) (string, error) {
-			return hue.CreateAppKey(bridgeAddress, defaultDeviceType, opts)
-		},
-		appKey: cfg.State.AppKey,
+		fetchBridgeCert:  fetchBridgeCertificatePEM,
+		appKey:           cfg.State.AppKey,
+	}
+	srv.createAppKey = func(bridgeAddress string) (string, error) {
+		srv.mu.RLock()
+		currentOpts := srv.opts
+		srv.mu.RUnlock()
+		return hue.CreateAppKey(bridgeAddress, defaultDeviceType, currentOpts)
 	}
 	srv.bridge = resolveBridgeStatusWithPersisted(srv.discoveryClient, cfg.BridgeIP, cfg.State.BridgeIP, discoveryURL)
 
@@ -324,12 +366,71 @@ func (s *setupServer) persistGeneratedAppKey(appKey string) error {
 	return nil
 }
 
+func (s *setupServer) persistBridgeCertificate(certPEM []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.configPath == "" {
+		return fmt.Errorf("config path is not configured")
+	}
+
+	certPath := s.config.TLSCACertFile
+	if certPath == "" {
+		certPath = filepath.Join(filepath.Dir(s.configPath), "bridge-ca.pem")
+	}
+	if err := os.MkdirAll(filepath.Dir(certPath), 0o755); err != nil {
+		return fmt.Errorf("creating certificate directory: %w", err)
+	}
+	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
+		return fmt.Errorf("writing bridge certificate file: %w", err)
+	}
+
+	s.config.TLSCACertFile = certPath
+	s.config.TLSInsecureSkipVerify = false
+	if err := saveConfig(s.configPath, &s.config); err != nil {
+		return err
+	}
+
+	s.opts.CACert = certPEM
+	s.opts.InsecureSkipVerify = false
+	return nil
+}
+
 func (s *setupServer) rediscoverBridge() (bridgeStatus, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.configuredBridge != "" {
 		return s.bridge, nil
+	}
+
+	func (s *setupServer) handleSaveBridgeCertificate(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		bridge, err := s.ensureBridgeStatus()
+		if err != nil {
+			s.renderHome(w, "", fmt.Sprintf("failed to prepare bridge status: %v", err))
+			return
+		}
+		if bridge.Address == "" {
+			s.renderHome(w, "", "bridge host/IP is unavailable")
+			return
+		}
+
+		certPEM, err := s.fetchBridgeCert(bridge.Address)
+		if err != nil {
+			s.renderHome(w, "", fmt.Sprintf("failed to fetch bridge certificate: %v", err))
+			return
+		}
+		if err := s.persistBridgeCertificate(certPEM); err != nil {
+			s.renderHome(w, "", fmt.Sprintf("failed to persist bridge certificate: %v", err))
+			return
+		}
+
+		s.renderHome(w, "Bridge certificate saved and config updated.", "")
 	}
 
 	resolved := resolveBridgeStatus(s.discoveryClient, "", s.discoveryURL)
@@ -478,6 +579,7 @@ func (s *setupServer) pageData(message, errorMessage string) homePageData {
 		BridgeSource:  s.bridge.Source,
 		BridgeError:   s.bridge.Error,
 		AppKeySet:     s.appKey != "",
+		TLSCACertFile: s.config.TLSCACertFile,
 		Message:       message,
 		ErrorMessage:  errorMessage,
 	}
@@ -565,6 +667,7 @@ func newMux(server *setupServer) *http.ServeMux {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/api/key", server.handleGenerateAppKey)
+	mux.HandleFunc("/api/cert", server.handleSaveBridgeCertificate)
 	mux.HandleFunc("/", server.handleHome)
 	return mux
 }
