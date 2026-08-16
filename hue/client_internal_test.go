@@ -3,6 +3,7 @@ package hue
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -70,5 +71,120 @@ func TestGetAPIError(t *testing.T) {
 	_, err := get[Light](newTestClient(server), "/light")
 	if err == nil || !strings.Contains(err.Error(), "API error") {
 		t.Fatalf("expected API error, got: %v", err)
+	}
+}
+
+func TestResourceWrapperPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		call func(*Client) error
+	}{
+		{name: "lights", path: "/light", call: func(c *Client) error { _, err := c.GetLights(); return err }},
+		{name: "grouped lights", path: "/grouped_light", call: func(c *Client) error { _, err := c.GetGroupedLights(); return err }},
+		{name: "rooms", path: "/room", call: func(c *Client) error { _, err := c.GetRooms(); return err }},
+		{name: "zones", path: "/zone", call: func(c *Client) error { _, err := c.GetZones(); return err }},
+		{name: "motion", path: "/motion", call: func(c *Client) error { _, err := c.GetMotion(); return err }},
+		{name: "temperature", path: "/temperature", call: func(c *Client) error { _, err := c.GetTemperature(); return err }},
+		{name: "light level", path: "/light_level", call: func(c *Client) error { _, err := c.GetLightLevel(); return err }},
+		{name: "device power", path: "/device_power", call: func(c *Client) error { _, err := c.GetDevicePower(); return err }},
+		{name: "zigbee", path: "/zigbee_connectivity", call: func(c *Client) error { _, err := c.GetZigbeeConnectivity(); return err }},
+		{name: "devices", path: "/device", call: func(c *Client) error { _, err := c.GetDevices(); return err }},
+		{name: "scenes", path: "/scene", call: func(c *Client) error { _, err := c.GetScenes(); return err }},
+		{name: "buttons", path: "/button", call: func(c *Client) error { _, err := c.GetButtons(); return err }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != tt.path {
+					t.Fatalf("unexpected path: %s", r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"data":[]}`))
+			}))
+			defer server.Close()
+
+			if err := tt.call(newTestClient(server)); err != nil {
+				t.Fatalf("wrapper returned error: %v", err)
+			}
+		})
+	}
+}
+
+func TestCreateAppKeySuccess(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if r.URL.Path != "/api" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`[{"success":{"username":"generated-key"}}]`))
+	}))
+	defer server.Close()
+
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+
+	appKey, err := CreateAppKey(u.Host, "hue_exporter#server", ClientOptions{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatalf("CreateAppKey returned error: %v", err)
+	}
+	if appKey != "generated-key" {
+		t.Fatalf("unexpected app key: %q", appKey)
+	}
+}
+
+func TestCreateAppKeyAPIError(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"error":{"description":"link button not pressed"}}]`))
+	}))
+	defer server.Close()
+
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+
+	_, err = CreateAppKey(u.Host, "hue_exporter#server", ClientOptions{InsecureSkipVerify: true})
+	if err == nil || !strings.Contains(err.Error(), "link button not pressed") {
+		t.Fatalf("expected Hue API error, got: %v", err)
+	}
+}
+
+func TestCreateAppKeyUnexpectedStatus(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+
+	_, err = CreateAppKey(u.Host, "hue_exporter#server", ClientOptions{InsecureSkipVerify: true})
+	if err == nil || !strings.Contains(err.Error(), "unexpected status 400") {
+		t.Fatalf("expected status error, got: %v", err)
+	}
+}
+
+func TestCreateAppKeyMissingUsername(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"success":{}}]`))
+	}))
+	defer server.Close()
+
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+
+	_, err = CreateAppKey(u.Host, "hue_exporter#server", ClientOptions{InsecureSkipVerify: true})
+	if err == nil || !strings.Contains(err.Error(), "did not include a username") {
+		t.Fatalf("expected missing username error, got: %v", err)
 	}
 }

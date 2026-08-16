@@ -4,9 +4,11 @@ services:
     container_name: hue-exporter
     command:
       - --config.file=/config/hue_exporter.yml
+      - --storage.file=/data/hue_exporter_state.yml
       - --web.listen-address=:9366
     volumes:
       - ./hue_exporter.yml:/config/hue_exporter.yml:ro
+      - hue-exporter:/data
     ports:
       - "9366:9366"
     restart: unless-stopped
@@ -19,3 +21,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+volumes:
+  hue-exporter:

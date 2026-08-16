@@ -2,6 +2,7 @@
 package hue
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -46,6 +47,18 @@ type ClientOptions struct {
 // bridgeIP is the IP address or hostname of the bridge.
 // appKey is the Hue application key (formerly called "username" in v1).
 func NewClient(bridgeIP, appKey string, opts ClientOptions) (*Client, error) {
+	httpClient, err := newHTTPClient(opts)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{
+		baseURL:    fmt.Sprintf("https://%s/clip/v2/resource", bridgeIP),
+		appKey:     appKey,
+		httpClient: httpClient,
+	}, nil
+}
+
+func newHTTPClient(opts ClientOptions) (*http.Client, error) {
 	tlsCfg := &tls.Config{}
 
 	if len(opts.CACert) > 0 {
@@ -58,15 +71,71 @@ func NewClient(bridgeIP, appKey string, opts ClientOptions) (*Client, error) {
 		tlsCfg.InsecureSkipVerify = true //nolint:gosec // Explicitly requested by caller for self-signed bridge cert
 	}
 
-	transport := &http.Transport{TLSClientConfig: tlsCfg}
-	return &Client{
-		baseURL: fmt.Sprintf("https://%s/clip/v2/resource", bridgeIP),
-		appKey:  appKey,
-		httpClient: &http.Client{
-			Timeout:   defaultTimeout,
-			Transport: transport,
-		},
+	return &http.Client{
+		Timeout:   defaultTimeout,
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
 	}, nil
+}
+
+type createAppKeyRequest struct {
+	DeviceType string `json:"devicetype"`
+}
+
+type createAppKeyResponse struct {
+	Success struct {
+		Username string `json:"username"`
+	} `json:"success"`
+	Error *struct {
+		Description string `json:"description"`
+	} `json:"error,omitempty"`
+}
+
+// CreateAppKey requests a new Hue application key from the bridge.
+func CreateAppKey(bridgeIP, deviceType string, opts ClientOptions) (string, error) {
+	httpClient, err := newHTTPClient(opts)
+	if err != nil {
+		return "", err
+	}
+
+	body, err := json.Marshal(createAppKeyRequest{DeviceType: deviceType})
+	if err != nil {
+		return "", fmt.Errorf("encoding app key request: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("https://%s/api", bridgeIP), bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("creating app key request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("creating app key: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("reading app key response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected status %d when creating app key: %s", resp.StatusCode, respBody)
+	}
+
+	var responses []createAppKeyResponse
+	if err := json.Unmarshal(respBody, &responses); err != nil {
+		return "", fmt.Errorf("decoding app key response: %w", err)
+	}
+	if len(responses) == 0 {
+		return "", fmt.Errorf("app key response was empty")
+	}
+	if responses[0].Error != nil {
+		return "", fmt.Errorf("Hue API error when creating app key: %s", responses[0].Error.Description)
+	}
+	if responses[0].Success.Username == "" {
+		return "", fmt.Errorf("app key response did not include a username")
+	}
+	return responses[0].Success.Username, nil
 }
 
 // get fetches a CLIP v2 resource endpoint and decodes the response.

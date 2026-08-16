@@ -11,6 +11,7 @@ deprecated or archived third-party Hue libraries required).
 
 * Uses the Hue **CLIP v2** (`/clip/v2/resource/...`) REST API directly
 * No dependency on deprecated Hue v1 client libraries
+* Provides a setup page to generate and persist a Hue API key
 * Exports metrics for lights, grouped lights, motion sensors, temperature
   sensors, light-level sensors, device battery levels, Zigbee connectivity,
   and scenes
@@ -60,6 +61,11 @@ curl -k -X POST https://<bridge_ip>/api \
 
 Copy the `success.username` value from the response; this is your `app_key`.
 
+Alternatively, start the exporter, open `http://localhost:9366/`, and use the
+setup page to view the configured/discovered bridge host or IP, check whether
+an API key is set, and generate and persist a key after pressing the bridge
+link button.
+
 ### 3. Configure TLS trust for the Hue bridge
 
 Hue bridges use self-signed certificates:
@@ -78,12 +84,12 @@ openssl s_client -showcerts -connect <bridge_ip>:443 </dev/null 2>/dev/null \
 ### 4. Create the configuration file
 
 Copy `hue_exporter.example.yml` to `hue_exporter.yml` and fill in your bridge
-IP and app key:
+IP. `app_key` is optional when you use the setup page:
 
 ```yaml
 # Optional: if omitted, the exporter will auto-discover a single bridge
 bridge_ip: 192.168.1.2
-app_key: "your-app-key-here"
+# app_key: "your-app-key-here"
 
 # Hue bridges use self-signed TLS certificates. Choose one:
 # Option A: skip TLS verification (quick, less secure)
@@ -120,16 +126,21 @@ Desktop for macOS or Windows, networking is more indirect, so setting
 
 ```bash
 go build -o hue-exporter .
-./hue-exporter --config.file hue_exporter.yml --web.listen-address :9366
+./hue-exporter \
+  --config.file hue_exporter.yml \
+  --storage.file /data/hue_exporter_state.yml \
+  --web.listen-address :9366
 ```
 
 Metrics are available at `http://localhost:9366/metrics`.
 Health is available at `http://localhost:9366/healthz` (liveness endpoint).
+Setup and status are available at `http://localhost:9366/`.
 
 ### Docker Compose example
 
 An example Compose file with a container health check is provided at
-`docker-compose.example.yml`.
+`docker-compose.example.yml`. It mounts a named `hue-exporter` volume at
+`/data` so generated API keys persist across restarts.
 
 ## Release, image tags, and branch protection
 
@@ -156,6 +167,7 @@ An example Compose file with a container health check is provided at
 | Flag | Default | Description |
 |---|---|---|
 | `--config.file` | `hue_exporter.yml` | Path to config file |
+| `--storage.file` | `/data/hue_exporter_state.yml` | Path to the persisted state file used for generated API keys |
 | `--web.listen-address` | `:9366` | Address to listen on |
 | `--healthcheck.target` | (empty) | Probe URL and exit with status 0 when healthy, 1 when unhealthy |
 

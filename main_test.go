@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/hypercat-net/hue-exporter/hue"
 )
 
 func writeTestConfig(t *testing.T, content string) string {
@@ -64,9 +66,12 @@ func TestLoadConfigMissingAppKey(t *testing.T) {
 bridge_ip: 192.168.1.2
 `)
 
-	_, err := loadConfig(path)
-	if err == nil || !strings.Contains(err.Error(), "app_key is required") {
-		t.Fatalf("expected app_key error, got: %v", err)
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("loadConfig returned error: %v", err)
+	}
+	if cfg.AppKey != "" {
+		t.Fatalf("expected empty app_key, got: %q", cfg.AppKey)
 	}
 }
 
@@ -76,6 +81,47 @@ func TestLoadConfigInvalidYAML(t *testing.T) {
 	_, err := loadConfig(path)
 	if err == nil || !strings.Contains(err.Error(), "parsing config") {
 		t.Fatalf("expected parsing error, got: %v", err)
+	}
+}
+
+func TestLoadPersistedStateMissingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing.yml")
+
+	state, err := loadPersistedState(path)
+	if err != nil {
+		t.Fatalf("loadPersistedState returned error: %v", err)
+	}
+	if state.AppKey != "" {
+		t.Fatalf("expected empty app key, got: %q", state.AppKey)
+	}
+}
+
+func TestSaveAndLoadPersistedState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state", "hue_exporter_state.yml")
+	want := &persistedState{AppKey: "saved-key"}
+
+	if err := savePersistedState(path, want); err != nil {
+		t.Fatalf("savePersistedState returned error: %v", err)
+	}
+
+	got, err := loadPersistedState(path)
+	if err != nil {
+		t.Fatalf("loadPersistedState returned error: %v", err)
+	}
+	if got.AppKey != want.AppKey {
+		t.Fatalf("unexpected app key: %q", got.AppKey)
+	}
+}
+
+func TestLoadPersistedStateInvalidYAML(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.yml")
+	if err := os.WriteFile(path, []byte("app_key: ["), 0o600); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+
+	_, err := loadPersistedState(path)
+	if err == nil || !strings.Contains(err.Error(), "parsing persisted state") {
+		t.Fatalf("expected persisted state parse error, got: %v", err)
 	}
 }
 
@@ -124,6 +170,43 @@ func TestDiscoverBridgeIPMultipleBridges(t *testing.T) {
 	}
 }
 
+func TestDiscoverBridgeIPStatusError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	_, err := discoverBridgeIP(server.Client(), server.URL)
+	if err == nil || !strings.Contains(err.Error(), "Hue discovery returned status 502") {
+		t.Fatalf("expected status error, got: %v", err)
+	}
+}
+
+func TestDiscoverBridgeIPMissingIPAddress(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"bridge-1","internalipaddress":""}]`))
+	}))
+	defer server.Close()
+
+	_, err := discoverBridgeIP(server.Client(), server.URL)
+	if err == nil || !strings.Contains(err.Error(), "missing internal IP address") {
+		t.Fatalf("expected missing IP error, got: %v", err)
+	}
+}
+
+func TestDiscoverBridgeIPInvalidJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("{"))
+	}))
+	defer server.Close()
+
+	_, err := discoverBridgeIP(server.Client(), server.URL)
+	if err == nil || !strings.Contains(err.Error(), "decoding Hue discovery response") {
+		t.Fatalf("expected decode error, got: %v", err)
+	}
+}
+
 func TestRunHealthcheckSuccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -151,5 +234,100 @@ func TestRunHealthcheckRequestFailure(t *testing.T) {
 	err := runHealthcheck("://bad-url")
 	if err == nil || !strings.Contains(err.Error(), "request failed") {
 		t.Fatalf("expected request failure error, got: %v", err)
+	}
+}
+
+func TestHomePageShowsBridgeAndAppKeyStatus(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.yml")
+	server, err := newSetupServer(&Config{BridgeIP: "bridge.local"}, statePath, hue.ClientOptions{}, hueDiscoveryURL)
+	if err != nil {
+		t.Fatalf("newSetupServer returned error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	newMux(server).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Bridge host/IP: bridge.local") {
+		t.Fatalf("expected bridge address in page, got: %s", body)
+	}
+	if !strings.Contains(body, "API key set: no") {
+		t.Fatalf("expected missing app key status, got: %s", body)
+	}
+}
+
+func TestGenerateAppKeyPersistsState(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.yml")
+	server, err := newSetupServer(&Config{BridgeIP: "bridge.local"}, statePath, hue.ClientOptions{}, hueDiscoveryURL)
+	if err != nil {
+		t.Fatalf("newSetupServer returned error: %v", err)
+	}
+	server.createAppKey = func(bridgeAddress string) (string, error) {
+		if bridgeAddress != "bridge.local" {
+			t.Fatalf("unexpected bridge address: %q", bridgeAddress)
+		}
+		return "generated-key", nil
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/key", nil)
+	rec := httptest.NewRecorder()
+	newMux(server).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "API key generated and saved.") {
+		t.Fatalf("expected success message, got: %s", body)
+	}
+	if !strings.Contains(body, "API key set: yes") {
+		t.Fatalf("expected app key status, got: %s", body)
+	}
+
+	state, err := loadPersistedState(statePath)
+	if err != nil {
+		t.Fatalf("loadPersistedState returned error: %v", err)
+	}
+	if state.AppKey != "generated-key" {
+		t.Fatalf("unexpected persisted app key: %q", state.AppKey)
+	}
+}
+
+func TestGenerateAppKeyMethodNotAllowed(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.yml")
+	server, err := newSetupServer(&Config{BridgeIP: "bridge.local"}, statePath, hue.ClientOptions{}, hueDiscoveryURL)
+	if err != nil {
+		t.Fatalf("newSetupServer returned error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/key", nil)
+	rec := httptest.NewRecorder()
+	newMux(server).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+}
+
+func TestMetricsUnavailableWithoutAppKey(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.yml")
+	server, err := newSetupServer(&Config{BridgeIP: "bridge.local"}, statePath, hue.ClientOptions{}, hueDiscoveryURL)
+	if err != nil {
+		t.Fatalf("newSetupServer returned error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	newMux(server).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "app_key is not configured") {
+		t.Fatalf("unexpected body: %s", rec.Body.String())
 	}
 }
