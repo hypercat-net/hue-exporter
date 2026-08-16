@@ -16,6 +16,11 @@ type HueCollector struct {
 	bridge hue.Bridge
 	mu     sync.Mutex
 
+	groupOwnerNames  map[string]string
+	seenGroupOwners  map[string]struct{}
+	deviceOwnerNames map[string]string
+	seenDeviceOwners map[string]struct{}
+
 	// lights
 	lightOn           *prometheus.GaugeVec
 	lightBrightness   *prometheus.GaugeVec
@@ -63,7 +68,11 @@ func New(bridge hue.Bridge) *HueCollector {
 	sceneLabels := []string{"id", "name", "group_name", "group_type"}
 
 	return &HueCollector{
-		bridge: bridge,
+		bridge:           bridge,
+		groupOwnerNames:  map[string]string{},
+		seenGroupOwners:  map[string]struct{}{},
+		deviceOwnerNames: map[string]string{},
+		seenDeviceOwners: map[string]struct{}{},
 
 		lightOn: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: namespace,
@@ -269,17 +278,14 @@ func (c *HueCollector) Collect(ch chan<- prometheus.Metric) {
 
 	c.sceneActive.Reset()
 
-	groupNames := c.groupedLightOwnerNames()
-	deviceNames := c.deviceOwnerNames()
-
 	c.collectLights()
-	c.collectGroupedLights(groupNames)
-	c.collectMotion(deviceNames)
-	c.collectTemperature(deviceNames)
-	c.collectLightLevel(deviceNames)
-	c.collectDevicePower(deviceNames)
-	c.collectZigbee(deviceNames)
-	c.collectScenes(groupNames)
+	c.collectGroupedLights()
+	c.collectMotion()
+	c.collectTemperature()
+	c.collectLightLevel()
+	c.collectDevicePower()
+	c.collectZigbee()
+	c.collectScenes()
 
 	// Collect all metrics.
 	c.lightOn.Collect(ch)
@@ -334,7 +340,7 @@ func isIgnoredGroupType(rtype string) bool {
 	return rtype == "private_group"
 }
 
-func (c *HueCollector) groupedLightOwnerNames() map[string]string {
+func (c *HueCollector) fetchGroupedLightOwnerNames() map[string]string {
 	names := map[string]string{}
 
 	if rooms, err := c.bridge.GetRooms(); err == nil {
@@ -352,7 +358,23 @@ func (c *HueCollector) groupedLightOwnerNames() map[string]string {
 	return names
 }
 
-func (c *HueCollector) deviceOwnerNames() map[string]string {
+func (c *HueCollector) groupedLightOwnerName(ref hue.ResourceRef) string {
+	key := resourceKey(ref.RType, ref.RID)
+	if name, ok := c.groupOwnerNames[key]; ok {
+		return name
+	}
+	if _, seen := c.seenGroupOwners[key]; seen {
+		return ""
+	}
+
+	for key, name := range c.fetchGroupedLightOwnerNames() {
+		c.groupOwnerNames[key] = name
+	}
+	c.seenGroupOwners[key] = struct{}{}
+	return c.groupOwnerNames[key]
+}
+
+func (c *HueCollector) fetchDeviceOwnerNames() map[string]string {
 	devices, err := c.bridge.GetDevices()
 	if err != nil {
 		return map[string]string{}
@@ -364,6 +386,22 @@ func (c *HueCollector) deviceOwnerNames() map[string]string {
 	}
 
 	return names
+}
+
+func (c *HueCollector) deviceOwnerName(ref hue.ResourceRef) string {
+	key := resourceKey(ref.RType, ref.RID)
+	if name, ok := c.deviceOwnerNames[key]; ok {
+		return name
+	}
+	if _, seen := c.seenDeviceOwners[key]; seen {
+		return ""
+	}
+
+	for key, name := range c.fetchDeviceOwnerNames() {
+		c.deviceOwnerNames[key] = name
+	}
+	c.seenDeviceOwners[key] = struct{}{}
+	return c.deviceOwnerNames[key]
 }
 
 func (c *HueCollector) collectLights() {
@@ -392,7 +430,7 @@ func (c *HueCollector) collectLights() {
 	}
 }
 
-func (c *HueCollector) collectGroupedLights(ownerNames map[string]string) {
+func (c *HueCollector) collectGroupedLights() {
 	groups, err := c.bridge.GetGroupedLights()
 	if err != nil {
 		c.groupedLightScrapesTotal.Add(1)
@@ -402,7 +440,7 @@ func (c *HueCollector) collectGroupedLights(ownerNames map[string]string) {
 		if isIgnoredGroupType(g.Owner.RType) {
 			continue
 		}
-		groupName := ownerNames[resourceKey(g.Owner.RType, g.Owner.RID)]
+		groupName := c.groupedLightOwnerName(g.Owner)
 		if groupName == "" {
 			continue
 		}
@@ -418,14 +456,14 @@ func (c *HueCollector) collectGroupedLights(ownerNames map[string]string) {
 	}
 }
 
-func (c *HueCollector) collectMotion(ownerNames map[string]string) {
+func (c *HueCollector) collectMotion() {
 	sensors, err := c.bridge.GetMotion()
 	if err != nil {
 		c.motionScrapesTotal.Add(1)
 		return
 	}
 	for _, s := range sensors {
-		deviceName := ownerNames[resourceKey(s.Owner.RType, s.Owner.RID)]
+		deviceName := c.deviceOwnerName(s.Owner)
 		if deviceName == "" {
 			continue
 		}
@@ -442,7 +480,7 @@ func (c *HueCollector) collectMotion(ownerNames map[string]string) {
 	}
 }
 
-func (c *HueCollector) collectTemperature(ownerNames map[string]string) {
+func (c *HueCollector) collectTemperature() {
 	sensors, err := c.bridge.GetTemperature()
 	if err != nil {
 		c.temperatureScrapesTotal.Add(1)
@@ -452,7 +490,7 @@ func (c *HueCollector) collectTemperature(ownerNames map[string]string) {
 		if !s.Temperature.TemperatureValid {
 			continue
 		}
-		deviceName := ownerNames[resourceKey(s.Owner.RType, s.Owner.RID)]
+		deviceName := c.deviceOwnerName(s.Owner)
 		if deviceName == "" {
 			continue
 		}
@@ -468,7 +506,7 @@ func (c *HueCollector) collectTemperature(ownerNames map[string]string) {
 	}
 }
 
-func (c *HueCollector) collectLightLevel(ownerNames map[string]string) {
+func (c *HueCollector) collectLightLevel() {
 	sensors, err := c.bridge.GetLightLevel()
 	if err != nil {
 		c.lightLevelScrapesTotal.Add(1)
@@ -478,7 +516,7 @@ func (c *HueCollector) collectLightLevel(ownerNames map[string]string) {
 		if !s.Light.LightLevelValid {
 			continue
 		}
-		deviceName := ownerNames[resourceKey(s.Owner.RType, s.Owner.RID)]
+		deviceName := c.deviceOwnerName(s.Owner)
 		if deviceName == "" {
 			continue
 		}
@@ -494,7 +532,7 @@ func (c *HueCollector) collectLightLevel(ownerNames map[string]string) {
 	}
 }
 
-func (c *HueCollector) collectDevicePower(ownerNames map[string]string) {
+func (c *HueCollector) collectDevicePower() {
 	devices, err := c.bridge.GetDevicePower()
 	if err != nil {
 		c.deviceScrapesTotal.Add(1)
@@ -504,7 +542,7 @@ func (c *HueCollector) collectDevicePower(ownerNames map[string]string) {
 		if d.PowerState.BatteryLevel == nil {
 			continue
 		}
-		deviceName := ownerNames[resourceKey(d.Owner.RType, d.Owner.RID)]
+		deviceName := c.deviceOwnerName(d.Owner)
 		if deviceName == "" {
 			continue
 		}
@@ -516,14 +554,14 @@ func (c *HueCollector) collectDevicePower(ownerNames map[string]string) {
 	}
 }
 
-func (c *HueCollector) collectZigbee(ownerNames map[string]string) {
+func (c *HueCollector) collectZigbee() {
 	devices, err := c.bridge.GetZigbeeConnectivity()
 	if err != nil {
 		c.zigbeeScrapesTotal.Add(1)
 		return
 	}
 	for _, d := range devices {
-		deviceName := ownerNames[resourceKey(d.Owner.RType, d.Owner.RID)]
+		deviceName := c.deviceOwnerName(d.Owner)
 		if deviceName == "" {
 			continue
 		}
@@ -536,7 +574,7 @@ func (c *HueCollector) collectZigbee(ownerNames map[string]string) {
 	}
 }
 
-func (c *HueCollector) collectScenes(groupNames map[string]string) {
+func (c *HueCollector) collectScenes() {
 	scenes, err := c.bridge.GetScenes()
 	if err != nil {
 		c.sceneScrapesTotal.Add(1)
@@ -546,7 +584,7 @@ func (c *HueCollector) collectScenes(groupNames map[string]string) {
 		if isIgnoredGroupType(s.Group.RType) {
 			continue
 		}
-		groupName := groupNames[resourceKey(s.Group.RType, s.Group.RID)]
+		groupName := c.groupedLightOwnerName(s.Group)
 		if groupName == "" {
 			continue
 		}

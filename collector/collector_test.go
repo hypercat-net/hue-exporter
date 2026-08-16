@@ -24,20 +24,33 @@ type mockBridge struct {
 	devices            []hue.Device
 	scenes             []hue.Scene
 	buttons            []hue.Button
+
+	getRoomsCalls   int
+	getZonesCalls   int
+	getDevicesCalls int
 }
 
 func (m *mockBridge) GetLights() ([]hue.Light, error)               { return m.lights, nil }
 func (m *mockBridge) GetGroupedLights() ([]hue.GroupedLight, error) { return m.groupedLights, nil }
-func (m *mockBridge) GetRooms() ([]hue.Room, error)                 { return m.rooms, nil }
-func (m *mockBridge) GetZones() ([]hue.Zone, error)                 { return m.zones, nil }
-func (m *mockBridge) GetMotion() ([]hue.Motion, error)              { return m.motion, nil }
-func (m *mockBridge) GetTemperature() ([]hue.Temperature, error)    { return m.temperature, nil }
-func (m *mockBridge) GetLightLevel() ([]hue.LightLevel, error)      { return m.lightLevel, nil }
-func (m *mockBridge) GetDevicePower() ([]hue.DevicePower, error)    { return m.devicePower, nil }
+func (m *mockBridge) GetRooms() ([]hue.Room, error) {
+	m.getRoomsCalls++
+	return m.rooms, nil
+}
+func (m *mockBridge) GetZones() ([]hue.Zone, error) {
+	m.getZonesCalls++
+	return m.zones, nil
+}
+func (m *mockBridge) GetMotion() ([]hue.Motion, error)           { return m.motion, nil }
+func (m *mockBridge) GetTemperature() ([]hue.Temperature, error) { return m.temperature, nil }
+func (m *mockBridge) GetLightLevel() ([]hue.LightLevel, error)   { return m.lightLevel, nil }
+func (m *mockBridge) GetDevicePower() ([]hue.DevicePower, error) { return m.devicePower, nil }
 func (m *mockBridge) GetZigbeeConnectivity() ([]hue.ZigbeeConnectivity, error) {
 	return m.zigbeeConnectivity, nil
 }
-func (m *mockBridge) GetDevices() ([]hue.Device, error) { return m.devices, nil }
+func (m *mockBridge) GetDevices() ([]hue.Device, error) {
+	m.getDevicesCalls++
+	return m.devices, nil
+}
 func (m *mockBridge) GetScenes() ([]hue.Scene, error)   { return m.scenes, nil }
 func (m *mockBridge) GetButtons() ([]hue.Button, error) { return m.buttons, nil }
 
@@ -535,5 +548,117 @@ func TestScenePrivateGroupSkipped(t *testing.T) {
 	expected := ``
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_scene_active"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
+	}
+}
+
+func TestOwnerNameCachesBetweenScrapes(t *testing.T) {
+	bridge := &mockBridge{
+		groupedLights: []hue.GroupedLight{
+			{
+				ID:    "group-4",
+				On:    hue.OnState{On: true},
+				Owner: hue.ResourceRef{RID: "room-2", RType: "room"},
+			},
+		},
+		rooms: []hue.Room{
+			{ID: "room-2", Metadata: hue.Metadata{Name: "Kitchen"}},
+		},
+		motion: []hue.Motion{
+			{
+				ID:      "motion-4",
+				Enabled: true,
+				Motion:  hue.MotionSensor{Motion: true},
+				Owner:   hue.ResourceRef{RID: "device-10", RType: "device"},
+			},
+		},
+		devices: []hue.Device{
+			{ID: "device-10", Metadata: hue.Metadata{Name: "Kitchen Sensor"}},
+		},
+	}
+
+	reg := newTestRegistry(bridge)
+
+	if _, err := reg.Gather(); err != nil {
+		t.Fatalf("first gather failed: %v", err)
+	}
+	if _, err := reg.Gather(); err != nil {
+		t.Fatalf("second gather failed: %v", err)
+	}
+
+	if bridge.getRoomsCalls != 1 {
+		t.Fatalf("expected GetRooms to be called once, got %d", bridge.getRoomsCalls)
+	}
+	if bridge.getZonesCalls != 1 {
+		t.Fatalf("expected GetZones to be called once, got %d", bridge.getZonesCalls)
+	}
+	if bridge.getDevicesCalls != 1 {
+		t.Fatalf("expected GetDevices to be called once, got %d", bridge.getDevicesCalls)
+	}
+}
+
+func TestOwnerNameCacheRefreshesForNewIDs(t *testing.T) {
+	bridge := &mockBridge{
+		groupedLights: []hue.GroupedLight{
+			{
+				ID:    "group-5",
+				On:    hue.OnState{On: true},
+				Owner: hue.ResourceRef{RID: "room-3", RType: "room"},
+			},
+		},
+		rooms: []hue.Room{
+			{ID: "room-3", Metadata: hue.Metadata{Name: "Bedroom"}},
+		},
+		motion: []hue.Motion{
+			{
+				ID:      "motion-5",
+				Enabled: true,
+				Motion:  hue.MotionSensor{Motion: true},
+				Owner:   hue.ResourceRef{RID: "device-11", RType: "device"},
+			},
+		},
+		devices: []hue.Device{
+			{ID: "device-11", Metadata: hue.Metadata{Name: "Bedroom Sensor"}},
+		},
+	}
+
+	reg := newTestRegistry(bridge)
+
+	if _, err := reg.Gather(); err != nil {
+		t.Fatalf("first gather failed: %v", err)
+	}
+
+	bridge.groupedLights = []hue.GroupedLight{
+		{
+			ID:    "group-6",
+			On:    hue.OnState{On: true},
+			Owner: hue.ResourceRef{RID: "room-4", RType: "room"},
+		},
+	}
+	bridge.rooms = append(bridge.rooms, hue.Room{ID: "room-4", Metadata: hue.Metadata{Name: "Office"}})
+	bridge.motion = []hue.Motion{
+		{
+			ID:      "motion-6",
+			Enabled: true,
+			Motion:  hue.MotionSensor{Motion: true},
+			Owner:   hue.ResourceRef{RID: "device-12", RType: "device"},
+		},
+	}
+	bridge.devices = append(bridge.devices, hue.Device{ID: "device-12", Metadata: hue.Metadata{Name: "Office Sensor"}})
+
+	if _, err := reg.Gather(); err != nil {
+		t.Fatalf("second gather failed: %v", err)
+	}
+	if _, err := reg.Gather(); err != nil {
+		t.Fatalf("third gather failed: %v", err)
+	}
+
+	if bridge.getRoomsCalls != 2 {
+		t.Fatalf("expected GetRooms to be called twice after a new room ID, got %d", bridge.getRoomsCalls)
+	}
+	if bridge.getZonesCalls != 2 {
+		t.Fatalf("expected GetZones to be called twice after a new room ID, got %d", bridge.getZonesCalls)
+	}
+	if bridge.getDevicesCalls != 2 {
+		t.Fatalf("expected GetDevices to be called twice after a new device ID, got %d", bridge.getDevicesCalls)
 	}
 }
