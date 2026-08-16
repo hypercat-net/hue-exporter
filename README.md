@@ -11,7 +11,7 @@ deprecated or archived third-party Hue libraries required).
 
 * Uses the Hue **CLIP v2** (`/clip/v2/resource/...`) REST API directly
 * No dependency on deprecated Hue v1 client libraries
-* Optional setup UI (disabled by default) to generate and persist a Hue API key
+* Optional setup UI (disabled by default) — a three-step wizard that auto-discovers the bridge, auto-saves the bridge certificate, and guides you through generating an API key
 * Persists the discovered bridge IP and re-runs discovery if that bridge later becomes unreachable
 * Exports metrics for lights, grouped lights, motion sensors, temperature
   sensors, light-level sensors, device battery levels, Zigbee connectivity,
@@ -70,21 +70,32 @@ HUE_EXPORTER_ENABLE_SETUP_UI=true ./hue-exporter
 ./hue-exporter --web.enable-setup-ui
 ```
 
-Then use the setup page to view the configured/discovered bridge host or IP,
-manually save the bridge host or IP when discovery is unavailable or
-rate-limited, check whether an API key is set, generate and persist a key after
-pressing the bridge link button, and save the bridge self-signed certificate
-into `tls_ca_cert_file`.
+The setup page walks you through three steps:
+
+1. **Bridge Discovery** — the exporter finds your bridge automatically via
+   mDNS (`_hue._tcp`) or the Hue cloud endpoint, and shows the IP and source.
+   If auto-discovery fails you can type the bridge IP manually and save it.
+
+2. **Bridge Certificate** — once the bridge address is known, the certificate
+   is fetched and saved automatically (no button required). If the fetch fails
+   (e.g. the bridge is temporarily unreachable) the page shows the error and
+   retries on the next page load.
+
+3. **API Key** — press the **link button** on your Hue Bridge, then click
+   *Generate and save API key*. Once the key is saved, the exporter is fully
+   operational.
 
 ### 3. Configure TLS trust for the Hue bridge
 
 Hue bridges use self-signed certificates:
 
-* **Quick setup**: set `tls_insecure_skip_verify: true`
-* **Recommended setup**: trust the bridge certificate and set
-  `tls_ca_cert_file`
-
-You can export the bridge certificate with:
+* **Recommended setup (automatic)**: when using the setup UI, Step 2 fetches
+  and saves the bridge certificate automatically into `tls_ca_cert_file` next
+  to your config file. No manual steps required.
+* **Quick setup**: set `tls_insecure_skip_verify: true` if you prefer to skip
+  certificate verification.
+* **Manual setup**: export the bridge certificate yourself and point
+  `tls_ca_cert_file` at it:
 
 ```bash
 openssl s_client -showcerts -connect <bridge_ip>:443 </dev/null 2>/dev/null \
@@ -145,9 +156,12 @@ tls_insecure_skip_verify: true
 ```
 
 If `bridge_ip` is omitted, the exporter first tries the last saved
-address and then uses `https://discovery.meethue.com/` when it needs to
-discover a bridge. Auto-discovery succeeds only when exactly one bridge is
-found; if none or multiple bridges are discovered, set `bridge_ip` explicitly.
+address and then runs auto-discovery. Discovery uses **mDNS** (`_hue._tcp`
+service) as the primary method — this works entirely on your local network
+with no internet access required. If mDNS finds nothing, it falls back to
+`https://discovery.meethue.com/`. Auto-discovery succeeds only when exactly
+one bridge is found; if none or multiple bridges are discovered, set
+`bridge_ip` explicitly.
 
 When the exporter is using a discovered or saved bridge address and that bridge
 stops responding, it retries discovery and updates the `state`
@@ -157,21 +171,20 @@ Discovery only resolves the bridge address. After that, the exporter connects
 directly to the bridge over HTTPS on your LAN using the returned private IP.
 That means the runtime environment must be able to:
 
-* reach `https://discovery.meethue.com/` to look up bridges
+* send mDNS/DNS-SD multicast queries on the local network (port 5353), **or**
+  reach `https://discovery.meethue.com/` as a fallback
 * reach the discovered bridge IP on port `443`
 
 #### Docker networking nuance
 
-When running in Docker, auto-discovery still depends on the container being
-able to reach both the public discovery service and the bridge's private LAN
-address. If the container cannot route to your LAN, discovery may find the
-bridge but the exporter will still fail to connect to it.
-
-On Linux, `--network host` is often the simplest option for local-network
-access. With bridge networking, port publishing is not enough by itself — the
-container also needs outbound access to the Hue bridge's subnet. On Docker
-Desktop for macOS or Windows, networking is more indirect, so setting
-`bridge_ip` explicitly is often the more predictable setup.
+When running in Docker, mDNS discovery requires the container to be on the
+same multicast-capable network segment as the bridge. On Linux, `--network
+host` is the simplest option and enables both mDNS and direct bridge access.
+With bridge networking, multicast is typically not forwarded, so mDNS will not
+work; the HTTP cloud fallback (`discovery.meethue.com`) or an explicit
+`bridge_ip` setting can be used instead. On Docker Desktop for macOS or
+Windows, networking is more indirect, so setting `bridge_ip` explicitly is
+often the most predictable setup.
 
 ### 6. Build and run
 
