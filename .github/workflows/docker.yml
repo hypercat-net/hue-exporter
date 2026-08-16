@@ -25,7 +25,7 @@ jobs:
       - name: Set up QEMU
         # Required to emulate non-native platforms during the final image
         # assembly step (the Go build itself is cross-compiled natively).
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
