@@ -511,6 +511,17 @@ func TestSetupUIEnabledFromFlagAndEnv(t *testing.T) {
 		}
 	})
 
+	t.Run("env false overrides flag", func(t *testing.T) {
+		t.Setenv("HUE_EXPORTER_ENABLE_SETUP_UI", "false")
+		enabled, err := setupUIEnabled(true)
+		if err != nil {
+			t.Fatalf("setupUIEnabled returned error: %v", err)
+		}
+		if enabled {
+			t.Fatal("expected setup UI disabled from environment override")
+		}
+	})
+
 	t.Run("invalid env fails", func(t *testing.T) {
 		t.Setenv("HUE_EXPORTER_ENABLE_SETUP_UI", "definitely-not-bool")
 		_, err := setupUIEnabled(false)

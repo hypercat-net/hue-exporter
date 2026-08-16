@@ -75,6 +75,7 @@ type setupServer struct {
 	fetchBridgeCert  func(string) ([]byte, error)
 	bridge           bridgeStatus
 	appKey           string
+	setupUIEnabled   bool
 	metricsHandler   http.Handler
 }
 
@@ -586,7 +587,7 @@ func (s *setupServer) pageData(message, errorMessage string) homePageData {
 		BridgeError:   s.bridge.Error,
 		AppKeySet:     s.appKey != "",
 		TLSCACertFile: s.config.TLSCACertFile,
-		SetupUIEnabled: true,
+		SetupUIEnabled: s.setupUIEnabled,
 		Message:       message,
 		ErrorMessage:  errorMessage,
 	}
@@ -667,6 +668,10 @@ func (s *setupServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 func newMux(server *setupServer, setupUIEnabled bool) *http.ServeMux {
+	server.mu.Lock()
+	server.setupUIEnabled = setupUIEnabled
+	server.mu.Unlock()
+
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", http.HandlerFunc(server.handleMetrics))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -690,10 +695,7 @@ func setupUIEnabled(flagValue bool) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("invalid HUE_EXPORTER_ENABLE_SETUP_UI value %q: %w", envValue, err)
 	}
-	if enabled {
-		return true, nil
-	}
-	return flagValue, nil
+	return enabled, nil
 }
 
 func main() {
