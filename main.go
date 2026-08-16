@@ -63,6 +63,7 @@ type homePageData struct {
 	BridgeSource          string
 	BridgeDiscoveryStatus string
 	DiscoveryDone         bool
+	DiscoveryError        bool // discovery was attempted but failed (no bridge found)
 
 	// Step 2: Certificate
 	CertSaved bool
@@ -127,7 +128,7 @@ button:disabled{opacity:.4;cursor:default}
 {{if .ErrorMessage}}<p class="err">{{.ErrorMessage}}</p>{{end}}
 
 <!-- Step 1: Discovery -->
-<div class="step{{if .DiscoveryDone}} done{{else}} failed{{end}}">
+<div class="step{{if .DiscoveryDone}} done{{else if .DiscoveryError}} failed{{end}}">
   <h3>Step 1 &mdash; Bridge Discovery</h3>
   {{if .BridgeAddress}}
     <p><span class="ok">&#10003;</span> Bridge found at <strong>{{.BridgeAddress}}</strong> (source: {{.BridgeSource}})</p>
@@ -312,15 +313,15 @@ func discoverBridgesHTTP(client *http.Client, discoveryURL string) ([]discovered
 }
 
 // discoverBridges tries mDNS first and falls back to the HTTP cloud endpoint
-// when mDNS finds no bridges. The mdns and http parameters allow callers (and
-// tests) to inject alternative implementations.
-func discoverBridges(mdns bridgeDiscoverer, http bridgeDiscoverer) ([]discoveredBridge, error) {
+// when mDNS finds no bridges. The mdns and httpFallback parameters allow
+// callers (and tests) to inject alternative implementations.
+func discoverBridges(mdns bridgeDiscoverer, httpFallback bridgeDiscoverer) ([]discoveredBridge, error) {
 	bridges, err := mdns()
 	if err == nil && len(bridges) > 0 {
 		return bridges, nil
 	}
 
-	return http()
+	return httpFallback()
 }
 
 func joinDiscoveryBridgeIPs(bridges []discoveredBridge) string {
@@ -860,6 +861,7 @@ func (s *setupServer) pageData(message, errorMessage, certError string) homePage
 		BridgeSource:          s.bridge.Source,
 		BridgeDiscoveryStatus: s.bridge.DiscoveryStatus,
 		DiscoveryDone:         s.bridge.Address != "",
+		DiscoveryError:        s.bridge.Address == "" && s.bridge.Error != "",
 		CertSaved:             s.config.TLSCACertFile != "",
 		CertFile:              s.config.TLSCACertFile,
 		CertError:             certError,
