@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/hypercat-net/hue-exporter/actions/workflows/ci.yml/badge.svg)](https://github.com/hypercat-net/hue-exporter/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/hypercat-net/hue-exporter)](LICENSE)
-[Support this project on Buy Me a Coffee](https://buymeacoffee.com/barcar)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-support-FFDD00?logo=buymeacoffee&logoColor=000000)](https://buymeacoffee.com/barcar)
 
 Prometheus exporter for Philips Hue using the native **CLIP v2 API** (no
 deprecated or archived third-party Hue libraries required).
