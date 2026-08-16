@@ -49,19 +49,20 @@ type persistedState struct {
 }
 
 type bridgeStatus struct {
-	Address string
-	Source  string
-	Error   string
+	Address         string
+	Source          string
+	Error           string
+	DiscoveryStatus string
 }
 
 type homePageData struct {
-	BridgeAddress string
-	BridgeSource  string
-	BridgeError   string
-	AppKeySet     bool
-	TLSCACertFile string
-	Message       string
-	ErrorMessage  string
+	BridgeAddress         string
+	BridgeSource          string
+	BridgeDiscoveryStatus string
+	AppKeySet             bool
+	TLSCACertFile         string
+	Message               string
+	ErrorMessage          string
 }
 
 type setupServer struct {
@@ -102,7 +103,7 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!DOCTYPE html>
 <ul>
   <li>Bridge host/IP: {{if .BridgeAddress}}{{.BridgeAddress}}{{else}}not available{{end}}</li>
   <li>Bridge source: {{.BridgeSource}}</li>
-  <li>Bridge discovery status: {{if .BridgeError}}{{.BridgeError}}{{else}}ok{{end}}</li>
+  <li>Bridge discovery status: {{if .BridgeDiscoveryStatus}}{{.BridgeDiscoveryStatus}}{{else}}not attempted{{end}}</li>
   <li>API key set: {{if .AppKeySet}}yes{{else}}no{{end}}</li>
   <li>Bridge certificate file: {{if .TLSCACertFile}}{{.TLSCACertFile}}{{else}}not configured{{end}}</li>
 </ul>
@@ -174,25 +175,9 @@ type discoveredBridge struct {
 }
 
 func discoverBridgeIP(client *http.Client, discoveryURL string) (string, error) {
-	resp, err := client.Get(discoveryURL)
+	bridges, err := discoverBridges(client, discoveryURL)
 	if err != nil {
-		return "", fmt.Errorf("discovering Hue bridges: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxDiscoveryResponseBytes))
-		return "", fmt.Errorf("Hue discovery returned status %d: %.200q", resp.StatusCode, string(body))
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxDiscoveryResponseBytes))
-	if err != nil {
-		return "", fmt.Errorf("reading Hue discovery response: %w", err)
-	}
-
-	var bridges []discoveredBridge
-	if err := json.Unmarshal(body, &bridges); err != nil {
-		return "", fmt.Errorf("decoding Hue discovery response: %w", err)
+		return "", err
 	}
 
 	switch len(bridges) {
@@ -204,7 +189,85 @@ func discoverBridgeIP(client *http.Client, discoveryURL string) (string, error) 
 		}
 		return bridges[0].InternalIPAddress, nil
 	default:
-		return "", fmt.Errorf("discovered %d Hue bridges; set bridge_ip in config", len(bridges))
+		return "", fmt.Errorf("discovered %d Hue bridges (%s); set bridge_ip in config", len(bridges), joinDiscoveryBridgeIPs(bridges))
+	}
+}
+
+func discoverBridges(client *http.Client, discoveryURL string) ([]discoveredBridge, error) {
+	resp, err := client.Get(discoveryURL)
+	if err != nil {
+		return nil, fmt.Errorf("discovering Hue bridges: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxDiscoveryResponseBytes))
+		return nil, fmt.Errorf("Hue discovery returned status %d: %.200q", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxDiscoveryResponseBytes))
+	if err != nil {
+		return nil, fmt.Errorf("reading Hue discovery response: %w", err)
+	}
+
+	var bridges []discoveredBridge
+	if err := json.Unmarshal(body, &bridges); err != nil {
+		return nil, fmt.Errorf("decoding Hue discovery response: %w", err)
+	}
+	return bridges, nil
+}
+
+func joinDiscoveryBridgeIPs(bridges []discoveredBridge) string {
+	ips := make([]string, 0, len(bridges))
+	for _, bridge := range bridges {
+		if bridge.InternalIPAddress == "" {
+			ips = append(ips, "<missing ip>")
+			continue
+		}
+		ips = append(ips, bridge.InternalIPAddress)
+	}
+	return strings.Join(ips, ", ")
+}
+
+func discoverBridgeStatus(client *http.Client, discoveryURL string) bridgeStatus {
+	bridges, err := discoverBridges(client, discoveryURL)
+	if err != nil {
+		return bridgeStatus{
+			Source:          "discovered",
+			Error:           err.Error(),
+			DiscoveryStatus: err.Error(),
+		}
+	}
+
+	switch len(bridges) {
+	case 0:
+		msg := "no Hue bridges discovered; set bridge_ip in config"
+		return bridgeStatus{
+			Source:          "discovered",
+			Error:           msg,
+			DiscoveryStatus: msg,
+		}
+	case 1:
+		if bridges[0].InternalIPAddress == "" {
+			msg := "Hue discovery response missing internal IP address"
+			return bridgeStatus{
+				Source:          "discovered",
+				Error:           msg,
+				DiscoveryStatus: msg,
+			}
+		}
+		return bridgeStatus{
+			Address:         bridges[0].InternalIPAddress,
+			Source:          "discovered",
+			DiscoveryStatus: fmt.Sprintf("discovered 1 Hue bridge: %s", bridges[0].InternalIPAddress),
+		}
+	default:
+		msg := fmt.Sprintf("discovered %d Hue bridges (%s); set bridge_ip in config", len(bridges), joinDiscoveryBridgeIPs(bridges))
+		return bridgeStatus{
+			Source:          "discovered",
+			Error:           msg,
+			DiscoveryStatus: msg,
+		}
 	}
 }
 
@@ -216,18 +279,7 @@ func resolveBridgeStatus(client *http.Client, configuredBridge, discoveryURL str
 		}
 	}
 
-	bridgeIP, err := discoverBridgeIP(client, discoveryURL)
-	if err != nil {
-		return bridgeStatus{
-			Source: "discovered",
-			Error:  err.Error(),
-		}
-	}
-
-	return bridgeStatus{
-		Address: bridgeIP,
-		Source:  "discovered",
-	}
+	return discoverBridgeStatus(client, discoveryURL)
 }
 
 func resolveBridgeStatusWithPersisted(client *http.Client, configuredBridge, persistedBridge, discoveryURL string) bridgeStatus {
@@ -649,13 +701,13 @@ func (s *setupServer) pageData(message, errorMessage string) homePageData {
 	defer s.mu.RUnlock()
 
 	return homePageData{
-		BridgeAddress: s.bridge.Address,
-		BridgeSource:  s.bridge.Source,
-		BridgeError:   s.bridge.Error,
-		AppKeySet:     s.appKey != "",
-		TLSCACertFile: s.config.TLSCACertFile,
-		Message:       message,
-		ErrorMessage:  errorMessage,
+		BridgeAddress:         s.bridge.Address,
+		BridgeSource:          s.bridge.Source,
+		BridgeDiscoveryStatus: s.bridge.DiscoveryStatus,
+		AppKeySet:             s.appKey != "",
+		TLSCACertFile:         s.config.TLSCACertFile,
+		Message:               message,
+		ErrorMessage:          errorMessage,
 	}
 }
 
