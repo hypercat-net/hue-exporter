@@ -84,6 +84,95 @@ func TestGetAPIError(t *testing.T) {
 	}
 }
 
+func TestGet429RetriesAndSucceeds(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 3 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"light-1","metadata":{"name":"Kitchen","archetype":"bulb"},"on":{"on":true}}]}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(server)
+	// Override the fallback wait to zero so the test doesn't take 2 seconds.
+	origWait := retryFallbackWait
+	retryFallbackWait = 0
+	defer func() { retryFallbackWait = origWait }()
+
+	data, err := get[Light](c, "/light")
+	if err != nil {
+		t.Fatalf("expected success after retries, got: %v", err)
+	}
+	if len(data) != 1 || data[0].ID != "light-1" {
+		t.Fatalf("unexpected result: %+v", data)
+	}
+	if attempts != 3 {
+		t.Fatalf("expected 3 attempts, got %d", attempts)
+	}
+}
+
+func TestGet429HonoursRetryAfterHeader(t *testing.T) {
+	attempts := 0
+	var sawDelay time.Duration
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer server.Close()
+
+	origWait := retryFallbackWait
+	retryFallbackWait = 5 * time.Second // would slow test if Retry-After is ignored
+	defer func() { retryFallbackWait = origWait }()
+
+	start := time.Now()
+	_, err := get[Light](newTestClient(server), "/light")
+	sawDelay = time.Since(start)
+
+	if err != nil {
+		t.Fatalf("expected success, got: %v", err)
+	}
+	// Retry-After: 0 → no sleep; if fallback were used it would be ≥5s.
+	if sawDelay >= time.Second {
+		t.Fatalf("Retry-After header was not respected; delay was %v", sawDelay)
+	}
+	_ = sawDelay
+}
+
+func TestGet429ExhaustsRetries(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	origWait := retryFallbackWait
+	retryFallbackWait = 0
+	defer func() { retryFallbackWait = origWait }()
+
+	_, err := get[Light](newTestClient(server), "/light")
+	if err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+	var reqErr *RequestError
+	if !errors.As(err, &reqErr) || reqErr.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 RequestError, got: %v", err)
+	}
+	if attempts != maxRetries+1 {
+		t.Fatalf("expected %d attempts, got %d", maxRetries+1, attempts)
+	}
+}
+
 func TestResourceWrapperPaths(t *testing.T) {
 	tests := []struct {
 		name string
