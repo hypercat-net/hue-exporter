@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"encoding/pem"
@@ -20,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/grandcat/zeroconf"
 	"github.com/hypercat-net/hue-exporter/collector"
 	"github.com/hypercat-net/hue-exporter/hue"
 	"github.com/prometheus/client_golang/prometheus"
@@ -68,8 +70,7 @@ type homePageData struct {
 type setupServer struct {
 	mu               sync.RWMutex
 	configuredBridge string
-	discoveryURL     string
-	discoveryClient  *http.Client
+	discoverer       bridgeDiscoverer
 	configPath       string
 	config           Config
 	opts             hue.ClientOptions
@@ -84,6 +85,8 @@ const (
 	hueDiscoveryURL           = "https://discovery.meethue.com/"
 	maxDiscoveryResponseBytes = 64 * 1024
 	defaultDeviceType         = "hue_exporter#server"
+	mdnsService               = "_hue._tcp"
+	mdnsDiscoveryTimeout      = 5 * time.Second
 )
 
 var homePageTemplate = template.Must(template.New("home").Parse(`<!DOCTYPE html>
@@ -174,26 +177,56 @@ type discoveredBridge struct {
 	InternalIPAddress string `json:"internalipaddress"`
 }
 
-func discoverBridgeIP(client *http.Client, discoveryURL string) (string, error) {
-	bridges, err := discoverBridges(client, discoveryURL)
+// bridgeDiscoverer is the interface used to locate Hue bridges on the network.
+// It is satisfied by discoverBridgesMDNS and discoverBridgesHTTP, and can be
+// replaced in tests with a fake implementation.
+type bridgeDiscoverer func() ([]discoveredBridge, error)
+
+// discoverBridgesMDNS browses for _hue._tcp mDNS/DNS-SD services and returns
+// any Hue bridges found on the local network. It is the preferred discovery
+// method because it works entirely on the local network without relying on an
+// external cloud endpoint.
+func discoverBridgesMDNS() ([]discoveredBridge, error) {
+	resolver, err := zeroconf.NewResolver(nil)
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("creating mDNS resolver: %w", err)
 	}
 
-	switch len(bridges) {
-	case 0:
-		return "", fmt.Errorf("no Hue bridges discovered; set bridge_ip in config")
-	case 1:
-		if bridges[0].InternalIPAddress == "" {
-			return "", fmt.Errorf("Hue discovery response missing internal IP address")
-		}
-		return bridges[0].InternalIPAddress, nil
-	default:
-		return "", fmt.Errorf("discovered %d Hue bridges (%s); set bridge_ip in config", len(bridges), joinDiscoveryBridgeIPs(bridges))
+	entries := make(chan *zeroconf.ServiceEntry)
+	ctx, cancel := context.WithTimeout(context.Background(), mdnsDiscoveryTimeout)
+	defer cancel()
+
+	if err := resolver.Browse(ctx, mdnsService, "local.", entries); err != nil {
+		return nil, fmt.Errorf("browsing mDNS for %s: %w", mdnsService, err)
 	}
+
+	var bridges []discoveredBridge
+	for entry := range entries {
+		var ip string
+		for _, addr := range entry.AddrIPv4 {
+			ip = addr.String()
+			break
+		}
+		if ip == "" {
+			for _, addr := range entry.AddrIPv6 {
+				ip = addr.String()
+				break
+			}
+		}
+		if ip == "" {
+			continue
+		}
+		bridges = append(bridges, discoveredBridge{
+			ID:                entry.ServiceRecord.Instance,
+			InternalIPAddress: ip,
+		})
+	}
+	return bridges, nil
 }
 
-func discoverBridges(client *http.Client, discoveryURL string) ([]discoveredBridge, error) {
+// discoverBridgesHTTP queries the Hue cloud discovery endpoint and returns the
+// list of bridges it reports. This is the fallback when mDNS finds nothing.
+func discoverBridgesHTTP(client *http.Client, discoveryURL string) ([]discoveredBridge, error) {
 	resp, err := client.Get(discoveryURL)
 	if err != nil {
 		return nil, fmt.Errorf("discovering Hue bridges: %w", err)
@@ -217,6 +250,18 @@ func discoverBridges(client *http.Client, discoveryURL string) ([]discoveredBrid
 	return bridges, nil
 }
 
+// discoverBridges tries mDNS first and falls back to the HTTP cloud endpoint
+// when mDNS finds no bridges. The mdns and http parameters allow callers (and
+// tests) to inject alternative implementations.
+func discoverBridges(mdns bridgeDiscoverer, http bridgeDiscoverer) ([]discoveredBridge, error) {
+	bridges, err := mdns()
+	if err == nil && len(bridges) > 0 {
+		return bridges, nil
+	}
+
+	return http()
+}
+
 func joinDiscoveryBridgeIPs(bridges []discoveredBridge) string {
 	ips := make([]string, 0, len(bridges))
 	for _, bridge := range bridges {
@@ -229,8 +274,40 @@ func joinDiscoveryBridgeIPs(bridges []discoveredBridge) string {
 	return strings.Join(ips, ", ")
 }
 
-func discoverBridgeStatus(client *http.Client, discoveryURL string) bridgeStatus {
-	bridges, err := discoverBridges(client, discoveryURL)
+// makeDiscoverer constructs the default bridgeDiscoverer that tries mDNS first
+// and falls back to the Hue HTTP cloud endpoint.
+func makeDiscoverer(client *http.Client, discoveryURL string) bridgeDiscoverer {
+	return func() ([]discoveredBridge, error) {
+		return discoverBridges(discoverBridgesMDNS, func() ([]discoveredBridge, error) {
+			return discoverBridgesHTTP(client, discoveryURL)
+		})
+	}
+}
+
+// discoverBridgeIP resolves a bridge IP using only the HTTP cloud endpoint.
+// It is intended for callers that already have an HTTP client and discovery URL
+// and do not need the mDNS-first behaviour of the full discovery stack.
+func discoverBridgeIP(client *http.Client, discoveryURL string) (string, error) {
+	bridges, err := discoverBridgesHTTP(client, discoveryURL)
+	if err != nil {
+		return "", err
+	}
+
+	switch len(bridges) {
+	case 0:
+		return "", fmt.Errorf("no Hue bridges discovered; set bridge_ip in config")
+	case 1:
+		if bridges[0].InternalIPAddress == "" {
+			return "", fmt.Errorf("Hue discovery response missing internal IP address")
+		}
+		return bridges[0].InternalIPAddress, nil
+	default:
+		return "", fmt.Errorf("discovered %d Hue bridges (%s); set bridge_ip in config", len(bridges), joinDiscoveryBridgeIPs(bridges))
+	}
+}
+
+func discoverBridgeStatus(discoverer bridgeDiscoverer) bridgeStatus {
+	bridges, err := discoverer()
 	if err != nil {
 		return bridgeStatus{
 			Source:          "discovered",
@@ -271,7 +348,7 @@ func discoverBridgeStatus(client *http.Client, discoveryURL string) bridgeStatus
 	}
 }
 
-func resolveBridgeStatus(client *http.Client, configuredBridge, discoveryURL string) bridgeStatus {
+func resolveBridgeStatus(discoverer bridgeDiscoverer, configuredBridge string) bridgeStatus {
 	if configuredBridge != "" {
 		return bridgeStatus{
 			Address: configuredBridge,
@@ -279,10 +356,10 @@ func resolveBridgeStatus(client *http.Client, configuredBridge, discoveryURL str
 		}
 	}
 
-	return discoverBridgeStatus(client, discoveryURL)
+	return discoverBridgeStatus(discoverer)
 }
 
-func resolveBridgeStatusWithPersisted(client *http.Client, configuredBridge, persistedBridge, discoveryURL string) bridgeStatus {
+func resolveBridgeStatusWithPersisted(discoverer bridgeDiscoverer, configuredBridge, persistedBridge string) bridgeStatus {
 	if configuredBridge != "" {
 		return bridgeStatus{
 			Address: configuredBridge,
@@ -295,7 +372,7 @@ func resolveBridgeStatusWithPersisted(client *http.Client, configuredBridge, per
 			Source:  "persisted",
 		}
 	}
-	return resolveBridgeStatus(client, "", discoveryURL)
+	return resolveBridgeStatus(discoverer, "")
 }
 
 func runHealthcheck(target string) error {
@@ -332,10 +409,10 @@ func newMetricsHandler(bridge hue.Bridge) http.Handler {
 }
 
 func newSetupServer(cfg *Config, configPath string, opts hue.ClientOptions, discoveryURL string) (*setupServer, error) {
+	discoverer := makeDiscoverer(&http.Client{Timeout: 10 * time.Second}, discoveryURL)
 	srv := &setupServer{
 		configuredBridge: cfg.BridgeIP,
-		discoveryURL:     discoveryURL,
-		discoveryClient:  &http.Client{Timeout: 10 * time.Second},
+		discoverer:       discoverer,
 		configPath:       configPath,
 		config:           *cfg,
 		opts:             opts,
@@ -348,7 +425,7 @@ func newSetupServer(cfg *Config, configPath string, opts hue.ClientOptions, disc
 		srv.mu.RUnlock()
 		return hue.CreateAppKey(bridgeAddress, defaultDeviceType, currentOpts)
 	}
-	srv.bridge = resolveBridgeStatusWithPersisted(srv.discoveryClient, cfg.BridgeIP, cfg.State.BridgeIP, discoveryURL)
+	srv.bridge = resolveBridgeStatusWithPersisted(discoverer, cfg.BridgeIP, cfg.State.BridgeIP)
 
 	appKey := cfg.AppKey
 	if appKey == "" {
