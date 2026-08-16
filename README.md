@@ -81,6 +81,7 @@ Copy `hue_exporter.example.yml` to `hue_exporter.yml` and fill in your bridge
 IP and app key:
 
 ```yaml
+# Optional: if omitted, the exporter will auto-discover a single bridge
 bridge_ip: 192.168.1.2
 app_key: "your-app-key-here"
 
@@ -90,6 +91,30 @@ tls_insecure_skip_verify: true
 # Option B: provide the bridge CA certificate (recommended)
 # tls_ca_cert_file: /path/to/bridge-ca.pem
 ```
+
+If `bridge_ip` is omitted, the exporter uses `https://discovery.meethue.com/`
+to find Hue bridges. Auto-discovery succeeds only when exactly one bridge is
+found; if none or multiple bridges are discovered, set `bridge_ip` explicitly.
+
+Discovery only resolves the bridge address. After that, the exporter connects
+directly to the bridge over HTTPS on your LAN using the returned private IP.
+That means the runtime environment must be able to:
+
+* reach `https://discovery.meethue.com/` to look up bridges
+* reach the discovered bridge IP on port `443`
+
+#### Docker networking nuance
+
+When running in Docker, auto-discovery still depends on the container being
+able to reach both the public discovery service and the bridge's private LAN
+address. If the container cannot route to your LAN, discovery may find the
+bridge but the exporter will still fail to connect to it.
+
+On Linux, `--network host` is often the simplest option for local-network
+access. With bridge networking, port publishing is not enough by itself — the
+container also needs outbound access to the Hue bridge's subnet. On Docker
+Desktop for macOS or Windows, networking is more indirect, so setting
+`bridge_ip` explicitly is often the more predictable setup.
 
 ### 5. Build and run
 

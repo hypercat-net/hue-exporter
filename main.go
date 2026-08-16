@@ -1,10 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/hypercat-net/hue-exporter/collector"
 	"github.com/hypercat-net/hue-exporter/hue"
@@ -15,17 +18,25 @@ import (
 
 // Config holds the exporter configuration loaded from a YAML file.
 type Config struct {
-	BridgeIP             string `yaml:"bridge_ip"`
-	AppKey               string `yaml:"app_key"`
+	BridgeIP string `yaml:"bridge_ip"`
+	AppKey   string `yaml:"app_key"`
 	// TLSInsecureSkipVerify disables TLS certificate verification when connecting
 	// to the bridge. Hue bridges use self-signed certificates, so this is
 	// typically required unless you provide the bridge CA certificate via
 	// TLSCACertFile.
-	TLSInsecureSkipVerify bool   `yaml:"tls_insecure_skip_verify"`
+	TLSInsecureSkipVerify bool `yaml:"tls_insecure_skip_verify"`
 	// TLSCACertFile is the path to a PEM-encoded CA certificate file used to
 	// verify the bridge's TLS certificate. When set, TLSInsecureSkipVerify is
 	// ignored.
 	TLSCACertFile string `yaml:"tls_ca_cert_file"`
+}
+
+const hueDiscoveryURL = "https://discovery.meethue.com/"
+const maxDiscoveryResponseBytes = 64 * 1024
+
+type discoveredBridge struct {
+	ID                string `json:"id"`
+	InternalIPAddress string `json:"internalipaddress"`
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -37,13 +48,45 @@ func loadConfig(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parsing config %s: %w", path, err)
 	}
-	if cfg.BridgeIP == "" {
-		return nil, fmt.Errorf("bridge_ip is required in config")
-	}
 	if cfg.AppKey == "" {
 		return nil, fmt.Errorf("app_key is required in config")
 	}
 	return &cfg, nil
+}
+
+func discoverBridgeIP(client *http.Client, discoveryURL string) (string, error) {
+	resp, err := client.Get(discoveryURL)
+	if err != nil {
+		return "", fmt.Errorf("discovering Hue bridges: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxDiscoveryResponseBytes))
+		return "", fmt.Errorf("Hue discovery returned status %d: %.200q", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxDiscoveryResponseBytes))
+	if err != nil {
+		return "", fmt.Errorf("reading Hue discovery response: %w", err)
+	}
+
+	var bridges []discoveredBridge
+	if err := json.Unmarshal(body, &bridges); err != nil {
+		return "", fmt.Errorf("decoding Hue discovery response: %w", err)
+	}
+
+	switch len(bridges) {
+	case 0:
+		return "", fmt.Errorf("no Hue bridges discovered; set bridge_ip in config")
+	case 1:
+		if bridges[0].InternalIPAddress == "" {
+			return "", fmt.Errorf("Hue discovery response missing internal IP address")
+		}
+		return bridges[0].InternalIPAddress, nil
+	default:
+		return "", fmt.Errorf("discovered %d Hue bridges; set bridge_ip in config", len(bridges))
+	}
 }
 
 func main() {
@@ -55,6 +98,16 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
+	}
+
+	bridgeIP := cfg.BridgeIP
+	if bridgeIP == "" {
+		bridgeIP, err = discoverBridgeIP(&http.Client{Timeout: 10 * time.Second}, hueDiscoveryURL)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "Discovered Hue bridge at %s\n", bridgeIP)
 	}
 
 	opts := hue.ClientOptions{
@@ -69,7 +122,7 @@ func main() {
 		opts.CACert = caCert
 	}
 
-	bridge, err := hue.NewClient(cfg.BridgeIP, cfg.AppKey, opts)
+	bridge, err := hue.NewClient(bridgeIP, cfg.AppKey, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating Hue client: %v\n", err)
 		os.Exit(1)

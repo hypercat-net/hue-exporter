@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,9 +50,12 @@ func TestLoadConfigMissingBridgeIP(t *testing.T) {
 app_key: test-key
 `)
 
-	_, err := loadConfig(path)
-	if err == nil || !strings.Contains(err.Error(), "bridge_ip is required") {
-		t.Fatalf("expected bridge_ip error, got: %v", err)
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("loadConfig returned error: %v", err)
+	}
+	if cfg.BridgeIP != "" {
+		t.Fatalf("expected empty bridge_ip, got: %q", cfg.BridgeIP)
 	}
 }
 
@@ -71,5 +76,50 @@ func TestLoadConfigInvalidYAML(t *testing.T) {
 	_, err := loadConfig(path)
 	if err == nil || !strings.Contains(err.Error(), "parsing config") {
 		t.Fatalf("expected parsing error, got: %v", err)
+	}
+}
+
+func TestDiscoverBridgeIPSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"bridge-1","internalipaddress":"192.168.1.2"}]`))
+	}))
+	defer server.Close()
+
+	bridgeIP, err := discoverBridgeIP(server.Client(), server.URL)
+	if err != nil {
+		t.Fatalf("discoverBridgeIP returned error: %v", err)
+	}
+	if bridgeIP != "192.168.1.2" {
+		t.Fatalf("unexpected bridge IP: %q", bridgeIP)
+	}
+}
+
+func TestDiscoverBridgeIPNoBridges(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer server.Close()
+
+	_, err := discoverBridgeIP(server.Client(), server.URL)
+	if err == nil || !strings.Contains(err.Error(), "no Hue bridges discovered") {
+		t.Fatalf("expected no bridges error, got: %v", err)
+	}
+}
+
+func TestDiscoverBridgeIPMultipleBridges(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[
+			{"id":"bridge-1","internalipaddress":"192.168.1.2"},
+			{"id":"bridge-2","internalipaddress":"192.168.1.3"}
+		]`))
+	}))
+	defer server.Close()
+
+	_, err := discoverBridgeIP(server.Client(), server.URL)
+	if err == nil || !strings.Contains(err.Error(), "discovered 2 Hue bridges") {
+		t.Fatalf("expected multiple bridges error, got: %v", err)
 	}
 }
