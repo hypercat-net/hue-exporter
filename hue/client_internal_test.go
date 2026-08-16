@@ -1,12 +1,21 @@
 package hue
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestClient(server *httptest.Server) *Client {
@@ -257,4 +266,196 @@ func TestCreateAppKeyAdditionalErrors(t *testing.T) {
 			t.Fatalf("expected decode error, got: %v", err)
 		}
 	})
+}
+
+func TestCreateAppKeyWithCACertAndIPWithoutIPSAN(t *testing.T) {
+	certPEM, tlsCert := createTestBridgeCertificate(t, []string{"bridge.local"})
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"success":{"username":"generated-key"}}]`))
+	}))
+	server.TLS = &tls.Config{Certificates: []tls.Certificate{tlsCert}}
+	server.StartTLS()
+	defer server.Close()
+
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+
+	host, port, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+	if host != "127.0.0.1" {
+		t.Fatalf("unexpected test server host: %s", host)
+	}
+
+	appKey, err := CreateAppKey(net.JoinHostPort("127.0.0.1", port), "hue_exporter#server", ClientOptions{CACert: certPEM})
+	if err != nil {
+		t.Fatalf("CreateAppKey returned error: %v", err)
+	}
+	if appKey != "generated-key" {
+		t.Fatalf("unexpected app key: %q", appKey)
+	}
+}
+
+func TestCreateAppKeyWithCACertAndHostWithoutAnySAN(t *testing.T) {
+	certPEM, tlsCert := createTestBridgeCertificate(t, nil)
+	localhostIPs, err := net.LookupIP("localhost")
+	if err != nil {
+		t.Fatalf("lookup localhost: %v", err)
+	}
+	hasIPv4Loopback := false
+	for _, ip := range localhostIPs {
+		if ip.Equal(net.IPv4(127, 0, 0, 1)) {
+			hasIPv4Loopback = true
+			break
+		}
+	}
+	if !hasIPv4Loopback {
+		t.Skip("localhost does not resolve to 127.0.0.1 on this environment")
+	}
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"success":{"username":"generated-key"}}]`))
+	}))
+	server.TLS = &tls.Config{Certificates: []tls.Certificate{tlsCert}}
+	server.StartTLS()
+	defer server.Close()
+
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	_, port, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+
+	appKey, err := CreateAppKey(net.JoinHostPort("localhost", port), "hue_exporter#server", ClientOptions{CACert: certPEM})
+	if err != nil {
+		t.Fatalf("CreateAppKey returned error: %v", err)
+	}
+	if appKey != "generated-key" {
+		t.Fatalf("unexpected app key: %q", appKey)
+	}
+}
+
+func TestCreateAppKeyRejectsNameMismatchForUnpinnedLeaf(t *testing.T) {
+	caPEM, tlsCert := createTestCAAndLeafCertificate(t, nil)
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"success":{"username":"generated-key"}}]`))
+	}))
+	server.TLS = &tls.Config{Certificates: []tls.Certificate{tlsCert}}
+	server.StartTLS()
+	defer server.Close()
+
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	_, port, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+
+	_, err = CreateAppKey(net.JoinHostPort("127.0.0.1", port), "hue_exporter#server", ClientOptions{CACert: caPEM})
+	if err == nil || !strings.Contains(err.Error(), "hostname mismatch is only allowed for pinned bridge certificates") {
+		t.Fatalf("expected pinned certificate mismatch error, got: %v", err)
+	}
+}
+
+func createTestBridgeCertificate(t *testing.T, dnsNames []string) ([]byte, tls.Certificate) {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate private key: %v", err)
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName: "bridge.local",
+		},
+		NotBefore:   time.Now().Add(-time.Hour),
+		NotAfter:    time.Now().Add(24 * time.Hour),
+		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment | x509.KeyUsageCertSign,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		DNSNames:              dnsNames,
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+
+	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("create TLS key pair: %v", err)
+	}
+
+	return certPEM, tlsCert
+}
+
+func createTestCAAndLeafCertificate(t *testing.T, leafDNSNames []string) ([]byte, tls.Certificate) {
+	t.Helper()
+
+	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate CA private key: %v", err)
+	}
+	caTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject: pkix.Name{
+			CommonName: "test-ca.local",
+		},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("create CA certificate: %v", err)
+	}
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})
+
+	leafKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate leaf private key: %v", err)
+	}
+	leafTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(3),
+		Subject: pkix.Name{
+			CommonName: "bridge.local",
+		},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              leafDNSNames,
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, caTemplate, &leafKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("create leaf certificate: %v", err)
+	}
+
+	leafCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER})
+	leafKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(leafKey)})
+	tlsCert, err := tls.X509KeyPair(leafCertPEM, leafKeyPEM)
+	if err != nil {
+		t.Fatalf("create TLS key pair: %v", err)
+	}
+
+	return caPEM, tlsCert
 }

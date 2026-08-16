@@ -6,9 +6,11 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 )
@@ -82,7 +84,7 @@ type ClientOptions struct {
 // bridgeIP is the IP address or hostname of the bridge.
 // appKey is the Hue application key (formerly called "username" in v1).
 func NewClient(bridgeIP, appKey string, opts ClientOptions) (*Client, error) {
-	httpClient, err := newHTTPClient(opts)
+	httpClient, err := newHTTPClient(opts, bridgeIP)
 	if err != nil {
 		return nil, err
 	}
@@ -93,15 +95,74 @@ func NewClient(bridgeIP, appKey string, opts ClientOptions) (*Client, error) {
 	}, nil
 }
 
-func newHTTPClient(opts ClientOptions) (*http.Client, error) {
+func newHTTPClient(opts ClientOptions, bridgeAddress string) (*http.Client, error) {
 	tlsCfg := &tls.Config{}
+	verifyName := bridgeTLSServerName(bridgeAddress)
 
 	if len(opts.CACert) > 0 {
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(opts.CACert) {
 			return nil, fmt.Errorf("failed to parse CA certificate")
 		}
+		pinnedCerts := map[string]struct{}{}
+		for remaining := opts.CACert; len(remaining) > 0; {
+			block, rest := pem.Decode(remaining)
+			if block == nil {
+				break
+			}
+			remaining = rest
+			if block.Type != "CERTIFICATE" {
+				continue
+			}
+			cert, err := x509.ParseCertificate(block.Bytes)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse CA certificate")
+			}
+			pinnedCerts[string(cert.Raw)] = struct{}{}
+		}
 		tlsCfg.RootCAs = pool
+		// Hue bridge certificates may not include SAN entries for the configured
+		// bridge address. Validate the certificate chain and allow name mismatch
+		// only when the bridge certificate itself is pinned in CACert.
+		tlsCfg.InsecureSkipVerify = true //nolint:gosec // Verification is enforced in VerifyConnection below.
+		tlsCfg.VerifyConnection = func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
+				return fmt.Errorf("bridge TLS handshake returned no peer certificates")
+			}
+			baseVerifyOpts := x509.VerifyOptions{
+				Roots:       pool,
+				CurrentTime: time.Now(),
+				KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+			}
+			if len(cs.PeerCertificates) > 1 {
+				intermediatePool := x509.NewCertPool()
+				for _, cert := range cs.PeerCertificates[1:] {
+					intermediatePool.AddCert(cert)
+				}
+				baseVerifyOpts.Intermediates = intermediatePool
+			}
+			if _, err := cs.PeerCertificates[0].Verify(baseVerifyOpts); err != nil {
+				return fmt.Errorf("verifying bridge certificate: %w", err)
+			}
+			if verifyName == "" {
+				return nil
+			}
+			verifyOpts := baseVerifyOpts
+			verifyOpts.DNSName = verifyName
+			_, err := cs.PeerCertificates[0].Verify(verifyOpts)
+			if err == nil {
+				return nil
+			}
+			var hostErr x509.HostnameError
+			var invalidErr x509.CertificateInvalidError
+			if errors.As(err, &hostErr) || (errors.As(err, &invalidErr) && invalidErr.Reason == x509.NameMismatch) {
+				if _, ok := pinnedCerts[string(cs.PeerCertificates[0].Raw)]; !ok {
+					return fmt.Errorf("verifying bridge certificate: hostname mismatch is only allowed for pinned bridge certificates")
+				}
+				return nil
+			}
+			return fmt.Errorf("verifying bridge certificate: %w", err)
+		}
 	} else if opts.InsecureSkipVerify {
 		tlsCfg.InsecureSkipVerify = true //nolint:gosec // Explicitly requested by caller for self-signed bridge cert
 	}
@@ -110,6 +171,14 @@ func newHTTPClient(opts ClientOptions) (*http.Client, error) {
 		Timeout:   defaultTimeout,
 		Transport: &http.Transport{TLSClientConfig: tlsCfg},
 	}, nil
+}
+
+func bridgeTLSServerName(bridgeAddress string) string {
+	host, _, err := net.SplitHostPort(bridgeAddress)
+	if err == nil {
+		return host
+	}
+	return bridgeAddress
 }
 
 type createAppKeyRequest struct {
@@ -127,7 +196,7 @@ type createAppKeyResponse struct {
 
 // CreateAppKey requests a new Hue application key from the bridge.
 func CreateAppKey(bridgeIP, deviceType string, opts ClientOptions) (string, error) {
-	httpClient, err := newHTTPClient(opts)
+	httpClient, err := newHTTPClient(opts, bridgeIP)
 	if err != nil {
 		return "", err
 	}
