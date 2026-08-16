@@ -1,8 +1,13 @@
 # Hue Exporter configuration
+# The exporter does not read environment variables for these settings.
 # bridge_ip: Optional IP address or hostname of the Hue bridge.
-#            If omitted, the exporter auto-discovers a single bridge.
+#            If omitted, the exporter reuses the persisted bridge_ip first and
+#            falls back to auto-discovery.
 # app_key:   Optional application key (formerly called "username" in the Hue v1 API).
-#            If omitted, use the web UI at / to generate one and persist it.
+#            If omitted, the exporter uses the persisted app_key or lets you
+#            generate one from the web UI at /.
+# Note: the exporter writes generated app_key values and discovered bridge_ip
+#       values to the persisted state file, not back into this config file.
 bridge_ip: 192.168.1.2
 # app_key: "your-app-key-here"
 

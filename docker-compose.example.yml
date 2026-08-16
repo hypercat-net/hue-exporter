@@ -7,7 +7,9 @@ services:
       - --storage.file=/data/hue_exporter_state.yml
       - --web.listen-address=:9366
     volumes:
+      # User-managed config file; the exporter does not rewrite it.
       - ./hue_exporter.yml:/config/hue_exporter.yml:ro
+      # Exporter-managed state (generated app_key + discovered bridge_ip).
       - hue-exporter:/data
     ports:
       - "9366:9366"

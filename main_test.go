@@ -248,56 +248,6 @@ func TestHomePageShowsBridgeAndAppKeyStatus(t *testing.T) {
 		t.Fatalf("newSetupServer returned error: %v", err)
 	}
 
-	func TestNewSetupServerUsesPersistedBridgeIP(t *testing.T) {
-		statePath := filepath.Join(t.TempDir(), "state.yml")
-		if err := savePersistedState(statePath, &persistedState{
-			BridgeIP: "bridge.local",
-			AppKey:   "saved-key",
-		}); err != nil {
-			t.Fatalf("savePersistedState returned error: %v", err)
-		}
-
-		server, err := newSetupServer(&Config{}, statePath, hue.ClientOptions{}, hueDiscoveryURL)
-		if err != nil {
-			t.Fatalf("newSetupServer returned error: %v", err)
-		}
-
-		if server.bridge.Address != "bridge.local" {
-			t.Fatalf("unexpected bridge address: %q", server.bridge.Address)
-		}
-		if server.bridge.Source != "persisted" {
-			t.Fatalf("unexpected bridge source: %q", server.bridge.Source)
-		}
-		if server.appKey != "saved-key" {
-			t.Fatalf("unexpected app key: %q", server.appKey)
-		}
-	}
-
-	func TestNewSetupServerPersistsDiscoveredBridgeIP(t *testing.T) {
-		discovery := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[{"id":"bridge-1","internalipaddress":"192.168.1.2"}]`))
-		}))
-		defer discovery.Close()
-
-		statePath := filepath.Join(t.TempDir(), "state.yml")
-		server, err := newSetupServer(&Config{}, statePath, hue.ClientOptions{}, discovery.URL)
-		if err != nil {
-			t.Fatalf("newSetupServer returned error: %v", err)
-		}
-
-		if server.bridge.Address != "192.168.1.2" {
-			t.Fatalf("unexpected bridge address: %q", server.bridge.Address)
-		}
-		state, err := loadPersistedState(statePath)
-		if err != nil {
-			t.Fatalf("loadPersistedState returned error: %v", err)
-		}
-		if state.BridgeIP != "192.168.1.2" {
-			t.Fatalf("unexpected persisted bridge IP: %q", state.BridgeIP)
-		}
-	}
-
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 	newMux(server).ServeHTTP(rec, req)
@@ -311,6 +261,56 @@ func TestHomePageShowsBridgeAndAppKeyStatus(t *testing.T) {
 	}
 	if !strings.Contains(body, "API key set: no") {
 		t.Fatalf("expected missing app key status, got: %s", body)
+	}
+}
+
+func TestNewSetupServerUsesPersistedBridgeIP(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.yml")
+	if err := savePersistedState(statePath, &persistedState{
+		BridgeIP: "bridge.local",
+		AppKey:   "saved-key",
+	}); err != nil {
+		t.Fatalf("savePersistedState returned error: %v", err)
+	}
+
+	server, err := newSetupServer(&Config{}, statePath, hue.ClientOptions{}, hueDiscoveryURL)
+	if err != nil {
+		t.Fatalf("newSetupServer returned error: %v", err)
+	}
+
+	if server.bridge.Address != "bridge.local" {
+		t.Fatalf("unexpected bridge address: %q", server.bridge.Address)
+	}
+	if server.bridge.Source != "persisted" {
+		t.Fatalf("unexpected bridge source: %q", server.bridge.Source)
+	}
+	if server.appKey != "saved-key" {
+		t.Fatalf("unexpected app key: %q", server.appKey)
+	}
+}
+
+func TestNewSetupServerPersistsDiscoveredBridgeIP(t *testing.T) {
+	discovery := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"bridge-1","internalipaddress":"192.168.1.2"}]`))
+	}))
+	defer discovery.Close()
+
+	statePath := filepath.Join(t.TempDir(), "state.yml")
+	server, err := newSetupServer(&Config{}, statePath, hue.ClientOptions{}, discovery.URL)
+	if err != nil {
+		t.Fatalf("newSetupServer returned error: %v", err)
+	}
+
+	if server.bridge.Address != "192.168.1.2" {
+		t.Fatalf("unexpected bridge address: %q", server.bridge.Address)
+	}
+	state, err := loadPersistedState(statePath)
+	if err != nil {
+		t.Fatalf("loadPersistedState returned error: %v", err)
+	}
+	if state.BridgeIP != "192.168.1.2" {
+		t.Fatalf("unexpected persisted bridge IP: %q", state.BridgeIP)
 	}
 }
 
