@@ -2,8 +2,9 @@
 
 ## Getting help
 
-- Open a GitHub Issue for bugs or feature requests.
-- For security issues, follow `SECURITY.md`.
+- Open a GitHub Issue for bugs and feature requests.
+- Search existing issues before opening a new one.
+- For security issues, use the private process in [SECURITY.md](SECURITY.md).
 
 When filing an issue, include:
 
@@ -11,3 +12,4 @@ When filing an issue, include:
 - Configuration (with secrets removed)
 - Relevant logs/errors
 - Steps to reproduce
+- Expected vs actual behavior

@@ -1,5 +1,8 @@
 # hue-exporter
 
+[![CI](https://github.com/hypercat-net/hue-exporter/actions/workflows/ci.yml/badge.svg)](https://github.com/hypercat-net/hue-exporter/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/hypercat-net/hue-exporter)](LICENSE)
+
 Prometheus exporter for Philips Hue using the native **CLIP v2 API** (no
 deprecated or archived third-party Hue libraries required).
 
@@ -138,3 +141,9 @@ collector/collector.go – Prometheus Collector implementation
 
 The `hue.Bridge` interface enables mock-based unit testing of all collectors
 without needing a real bridge.
+
+## Contributing and support
+
+- Contribution guidelines: [CONTRIBUTING.md](CONTRIBUTING.md)
+- Security policy: [SECURITY.md](SECURITY.md)
+- Support process: [SUPPORT.md](SUPPORT.md)
