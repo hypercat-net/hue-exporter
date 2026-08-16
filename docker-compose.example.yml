@@ -3,10 +3,11 @@ services:
     image: ghcr.io/hypercat-net/hue-exporter:latest
     container_name: hue-exporter
     command:
-      - --config.file=/config/hue_exporter.yml
+      - --config.file=/data/hue_exporter.yml
       - --web.listen-address=:9366
     volumes:
-      - ./hue_exporter.yml:/config/hue_exporter.yml:ro
+      # Single mounted YAML: user-managed settings plus exporter-managed state.
+      - ./hue_exporter.yml:/data/hue_exporter.yml
     ports:
       - "9366:9366"
     restart: unless-stopped

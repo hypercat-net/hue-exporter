@@ -40,6 +40,8 @@ COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
 COPY --from=builder /hue-exporter /hue-exporter
 
+VOLUME ["/data"]
+
 EXPOSE 9366
 
 ENTRYPOINT ["/hue-exporter"]

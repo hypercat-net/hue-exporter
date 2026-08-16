@@ -11,6 +11,8 @@ deprecated or archived third-party Hue libraries required).
 
 * Uses the Hue **CLIP v2** (`/clip/v2/resource/...`) REST API directly
 * No dependency on deprecated Hue v1 client libraries
+* Provides a setup page to generate and persist a Hue API key
+* Persists the discovered bridge IP and re-runs discovery if that bridge later becomes unreachable
 * Exports metrics for lights, grouped lights, motion sensors, temperature
   sensors, light-level sensors, device battery levels, Zigbee connectivity,
   and scenes
@@ -60,6 +62,11 @@ curl -k -X POST https://<bridge_ip>/api \
 
 Copy the `success.username` value from the response; this is your `app_key`.
 
+Alternatively, start the exporter, open `http://localhost:9366/`, and use the
+setup page to view the configured/discovered bridge host or IP, check whether
+an API key is set, and generate and persist a key after pressing the bridge
+link button.
+
 ### 3. Configure TLS trust for the Hue bridge
 
 Hue bridges use self-signed certificates:
@@ -75,26 +82,66 @@ openssl s_client -showcerts -connect <bridge_ip>:443 </dev/null 2>/dev/null \
   | openssl x509 -outform PEM > bridge-ca.pem
 ```
 
-### 4. Create the configuration file
+### 4. Understand config and runtime state
+
+The exporter does **not** read environment variables for bridge settings or API
+credentials.
+
+There are two configuration layers:
+
+1. **CLI flags** (`--config.file`, `--web.listen-address`) choose the config
+   file location and server behavior.
+2. **YAML config file** holds both user-managed settings and exporter-managed
+   runtime state.
+
+Precedence is:
+
+* `bridge_ip` in the YAML config wins
+* otherwise the exporter reuses `state.bridge_ip`
+* otherwise it runs Hue discovery
+
+For `app_key`:
+
+* `app_key` in the YAML config wins
+* otherwise the exporter uses `state.app_key`
+
+When it discovers a bridge or generates an API key, the exporter writes those
+runtime values back into the same YAML file under `state`.
+
+### 5. Create the configuration file
 
 Copy `hue_exporter.example.yml` to `hue_exporter.yml` and fill in your bridge
-IP and app key:
+IP if you want to pin the exporter to a specific bridge. `app_key` is optional
+when you use the setup page:
 
 ```yaml
-# Optional: if omitted, the exporter will auto-discover a single bridge
+# Optional: if omitted, the exporter will use state.bridge_ip first,
+# then auto-discover a single bridge when needed.
 bridge_ip: 192.168.1.2
-app_key: "your-app-key-here"
+# Optional: if omitted, the exporter will use state.app_key first.
+# app_key: "your-app-key-here"
 
 # Hue bridges use self-signed TLS certificates. Choose one:
 # Option A: skip TLS verification (quick, less secure)
 tls_insecure_skip_verify: true
 # Option B: provide the bridge CA certificate (recommended)
 # tls_ca_cert_file: /path/to/bridge-ca.pem
+
+# Exporter-managed runtime state. You can omit this section and let the
+# exporter create or update it.
+# state:
+#   bridge_ip: 192.168.1.2
+#   app_key: generated-key
 ```
 
-If `bridge_ip` is omitted, the exporter uses `https://discovery.meethue.com/`
-to find Hue bridges. Auto-discovery succeeds only when exactly one bridge is
+If `bridge_ip` is omitted, the exporter first tries the last saved
+address and then uses `https://discovery.meethue.com/` when it needs to
+discover a bridge. Auto-discovery succeeds only when exactly one bridge is
 found; if none or multiple bridges are discovered, set `bridge_ip` explicitly.
+
+When the exporter is using a discovered or saved bridge address and that bridge
+stops responding, it retries discovery and updates the `state`
+with the new address.
 
 Discovery only resolves the bridge address. After that, the exporter connects
 directly to the bridge over HTTPS on your LAN using the returned private IP.
@@ -116,20 +163,30 @@ container also needs outbound access to the Hue bridge's subnet. On Docker
 Desktop for macOS or Windows, networking is more indirect, so setting
 `bridge_ip` explicitly is often the more predictable setup.
 
-### 5. Build and run
+### 6. Build and run
 
 ```bash
 go build -o hue-exporter .
-./hue-exporter --config.file hue_exporter.yml --web.listen-address :9366
+./hue-exporter \
+  --config.file hue_exporter.yml \
+  --web.listen-address :9366
 ```
 
 Metrics are available at `http://localhost:9366/metrics`.
 Health is available at `http://localhost:9366/healthz` (liveness endpoint).
+Setup and status are available at `http://localhost:9366/`.
 
 ### Docker Compose example
 
 An example Compose file with a container health check is provided at
 `docker-compose.example.yml`.
+
+The Compose example uses a single mounted YAML file:
+
+* `./hue_exporter.yml` is mounted read-write at `/data/hue_exporter.yml`
+* that file contains both your config and the exporter-managed `state` section
+
+No environment variables are required.
 
 ## Release, image tags, and branch protection
 

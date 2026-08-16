@@ -2,9 +2,11 @@
 package hue
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +14,40 @@ import (
 )
 
 const defaultTimeout = 10 * time.Second
+
+// RequestError describes a failed bridge request.
+type RequestError struct {
+	Path       string
+	StatusCode int
+	Err        error
+}
+
+func (e *RequestError) Error() string {
+	switch {
+	case e == nil:
+		return "<nil>"
+	case e.StatusCode != 0:
+		return fmt.Sprintf("unexpected status %d from %s: %v", e.StatusCode, e.Path, e.Err)
+	case e.Err != nil:
+		return fmt.Sprintf("request to %s failed: %v", e.Path, e.Err)
+	default:
+		return fmt.Sprintf("request to %s failed", e.Path)
+	}
+}
+
+func (e *RequestError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// IsConnectionError reports whether err indicates that the bridge was
+// unreachable before it returned an HTTP response.
+func IsConnectionError(err error) bool {
+	var requestErr *RequestError
+	return errors.As(err, &requestErr) && requestErr != nil && requestErr.Err != nil && requestErr.StatusCode == 0
+}
 
 // apiResponse is the standard envelope returned by every CLIP v2 endpoint.
 type apiResponse[T any] struct {
@@ -46,6 +82,18 @@ type ClientOptions struct {
 // bridgeIP is the IP address or hostname of the bridge.
 // appKey is the Hue application key (formerly called "username" in v1).
 func NewClient(bridgeIP, appKey string, opts ClientOptions) (*Client, error) {
+	httpClient, err := newHTTPClient(opts)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{
+		baseURL:    fmt.Sprintf("https://%s/clip/v2/resource", bridgeIP),
+		appKey:     appKey,
+		httpClient: httpClient,
+	}, nil
+}
+
+func newHTTPClient(opts ClientOptions) (*http.Client, error) {
 	tlsCfg := &tls.Config{}
 
 	if len(opts.CACert) > 0 {
@@ -58,15 +106,71 @@ func NewClient(bridgeIP, appKey string, opts ClientOptions) (*Client, error) {
 		tlsCfg.InsecureSkipVerify = true //nolint:gosec // Explicitly requested by caller for self-signed bridge cert
 	}
 
-	transport := &http.Transport{TLSClientConfig: tlsCfg}
-	return &Client{
-		baseURL: fmt.Sprintf("https://%s/clip/v2/resource", bridgeIP),
-		appKey:  appKey,
-		httpClient: &http.Client{
-			Timeout:   defaultTimeout,
-			Transport: transport,
-		},
+	return &http.Client{
+		Timeout:   defaultTimeout,
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
 	}, nil
+}
+
+type createAppKeyRequest struct {
+	DeviceType string `json:"devicetype"`
+}
+
+type createAppKeyResponse struct {
+	Success struct {
+		Username string `json:"username"`
+	} `json:"success"`
+	Error *struct {
+		Description string `json:"description"`
+	} `json:"error,omitempty"`
+}
+
+// CreateAppKey requests a new Hue application key from the bridge.
+func CreateAppKey(bridgeIP, deviceType string, opts ClientOptions) (string, error) {
+	httpClient, err := newHTTPClient(opts)
+	if err != nil {
+		return "", err
+	}
+
+	body, err := json.Marshal(createAppKeyRequest{DeviceType: deviceType})
+	if err != nil {
+		return "", fmt.Errorf("encoding app key request: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("https://%s/api", bridgeIP), bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("creating app key request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("creating app key: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("reading app key response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected status %d when creating app key: %s", resp.StatusCode, respBody)
+	}
+
+	var responses []createAppKeyResponse
+	if err := json.Unmarshal(respBody, &responses); err != nil {
+		return "", fmt.Errorf("decoding app key response: %w", err)
+	}
+	if len(responses) == 0 {
+		return "", fmt.Errorf("app key response was empty")
+	}
+	if responses[0].Error != nil {
+		return "", fmt.Errorf("Hue API error when creating app key: %s", responses[0].Error.Description)
+	}
+	if responses[0].Success.Username == "" {
+		return "", fmt.Errorf("app key response did not include a username")
+	}
+	return responses[0].Success.Username, nil
 }
 
 // get fetches a CLIP v2 resource endpoint and decodes the response.
@@ -79,17 +183,17 @@ func get[T any](c *Client, path string) ([]T, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetching %s: %w", path, err)
+		return nil, &RequestError{Path: path, Err: err}
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("reading body from %s: %w", path, err)
+		return nil, &RequestError{Path: path, Err: err}
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status %d from %s: %s", resp.StatusCode, path, body)
+		return nil, &RequestError{Path: path, StatusCode: resp.StatusCode, Err: fmt.Errorf("%s", body)}
 	}
 
 	var envelope apiResponse[T]
