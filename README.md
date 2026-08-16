@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/hypercat-net/hue-exporter/actions/workflows/ci.yml/badge.svg)](https://github.com/hypercat-net/hue-exporter/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/hypercat-net/hue-exporter)](LICENSE)
+[![BuyMeACoffee](https://raw.githubusercontent.com/barcar/buymeacoffee-badges/main/bmc-donate-white.svg)](https://buymeacoffee.com/barcar)
 
 Prometheus exporter for Philips Hue using the native **CLIP v2 API** (no
 deprecated or archived third-party Hue libraries required).
@@ -116,6 +117,8 @@ Metrics are available at `http://localhost:9366/metrics`.
   * requiring CI checks:
     * `CI / Build and test`
     * `Build and push Docker image / Build multi-platform image`
+* Branch protection is configured in GitHub repository settings, not in this
+  repository's files.
 
 ### Flags
 
