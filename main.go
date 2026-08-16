@@ -32,6 +32,7 @@ type Config struct {
 }
 
 const hueDiscoveryURL = "https://discovery.meethue.com/"
+const maxDiscoveryResponseBytes = 64 * 1024
 
 type discoveredBridge struct {
 	ID                string `json:"id"`
@@ -60,7 +61,7 @@ func discoverBridgeIP(client *http.Client, discoveryURL string) (string, error) 
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxDiscoveryResponseBytes))
 	if err != nil {
 		return "", fmt.Errorf("reading Hue discovery response: %w", err)
 	}
