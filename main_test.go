@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hypercat-net/hue-exporter/hue"
 )
@@ -568,6 +569,145 @@ func TestGetLightsRediscoveryUpdatesPersistedBridgeIP(t *testing.T) {
 	firstURL, err := url.Parse(firstBridge.URL)
 	if err != nil {
 		t.Fatalf("parse first bridge URL: %v", err)
+	}
+
+	func TestBuildClientOptions(t *testing.T) {
+		t.Run("uses insecure skip verify from config", func(t *testing.T) {
+			opts, err := buildClientOptions(&Config{TLSInsecureSkipVerify: true})
+			if err != nil {
+				t.Fatalf("buildClientOptions returned error: %v", err)
+			}
+			if !opts.InsecureSkipVerify {
+				t.Fatal("expected InsecureSkipVerify to be true")
+			}
+		})
+
+		t.Run("loads CA cert bytes from file", func(t *testing.T) {
+			certPath := filepath.Join(t.TempDir(), "bridge-ca.pem")
+			want := []byte("test-ca-cert")
+			if err := os.WriteFile(certPath, want, 0o600); err != nil {
+				t.Fatalf("write cert file: %v", err)
+			}
+
+			opts, err := buildClientOptions(&Config{TLSCACertFile: certPath})
+			if err != nil {
+				t.Fatalf("buildClientOptions returned error: %v", err)
+			}
+			if string(opts.CACert) != string(want) {
+				t.Fatalf("unexpected CA cert bytes: %q", string(opts.CACert))
+			}
+			if opts.InsecureSkipVerify {
+				t.Fatal("expected InsecureSkipVerify to be false when CA cert is configured")
+			}
+		})
+
+		t.Run("returns error when cert file is unreadable", func(t *testing.T) {
+			_, err := buildClientOptions(&Config{TLSCACertFile: filepath.Join(t.TempDir(), "missing.pem")})
+			if err == nil || !strings.Contains(err.Error(), "reading CA cert file") {
+				t.Fatalf("expected cert read error, got: %v", err)
+			}
+		})
+	}
+
+	func TestResolveBridgeStatusConfigured(t *testing.T) {
+		got := resolveBridgeStatus(&http.Client{}, "bridge.local", "https://unused.local")
+		if got.Address != "bridge.local" || got.Source != "configured" || got.Error != "" {
+			t.Fatalf("unexpected bridge status: %+v", got)
+		}
+	}
+
+	func TestResolveBridgeStatusDiscoveryError(t *testing.T) {
+		got := resolveBridgeStatus(&http.Client{Timeout: 100 * time.Millisecond}, "", "http://127.0.0.1:1")
+		if got.Address != "" {
+			t.Fatalf("expected empty address, got: %q", got.Address)
+		}
+		if got.Source != "discovered" {
+			t.Fatalf("unexpected source: %q", got.Source)
+		}
+		if got.Error == "" {
+			t.Fatal("expected discovery error")
+		}
+	}
+
+	func TestEnsureBridgeStatusDiscoversAndPersists(t *testing.T) {
+		discovery := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"id":"bridge-1","internalipaddress":"192.168.1.20"}]`))
+		}))
+		defer discovery.Close()
+
+		configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
+		server := &setupServer{
+			discoveryClient: discovery.Client(),
+			discoveryURL:    discovery.URL,
+			configPath:      configPath,
+			config:          Config{},
+		}
+
+		bridge, err := server.ensureBridgeStatus()
+		if err != nil {
+			t.Fatalf("ensureBridgeStatus returned error: %v", err)
+		}
+		if bridge.Address != "192.168.1.20" {
+			t.Fatalf("unexpected bridge address: %q", bridge.Address)
+		}
+
+		cfg, err := loadConfig(configPath)
+		if err != nil {
+			t.Fatalf("loadConfig returned error: %v", err)
+		}
+		if cfg.State.BridgeIP != "192.168.1.20" {
+			t.Fatalf("unexpected persisted bridge IP: %q", cfg.State.BridgeIP)
+		}
+	}
+
+	func TestSetupServerBridgeWrappers(t *testing.T) {
+		bridge := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[]}`))
+		}))
+		defer bridge.Close()
+
+		bridgeURL, err := url.Parse(bridge.URL)
+		if err != nil {
+			t.Fatalf("parse bridge URL: %v", err)
+		}
+
+		configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
+		server, err := newSetupServer(
+			&Config{BridgeIP: bridgeURL.Host, AppKey: "saved-key", TLSInsecureSkipVerify: true},
+			configPath,
+			hue.ClientOptions{InsecureSkipVerify: true},
+			hueDiscoveryURL,
+		)
+		if err != nil {
+			t.Fatalf("newSetupServer returned error: %v", err)
+		}
+
+		tests := []struct {
+			name string
+			call func() error
+		}{
+			{name: "GetGroupedLights", call: func() error { _, err := server.GetGroupedLights(); return err }},
+			{name: "GetRooms", call: func() error { _, err := server.GetRooms(); return err }},
+			{name: "GetZones", call: func() error { _, err := server.GetZones(); return err }},
+			{name: "GetMotion", call: func() error { _, err := server.GetMotion(); return err }},
+			{name: "GetTemperature", call: func() error { _, err := server.GetTemperature(); return err }},
+			{name: "GetLightLevel", call: func() error { _, err := server.GetLightLevel(); return err }},
+			{name: "GetDevicePower", call: func() error { _, err := server.GetDevicePower(); return err }},
+			{name: "GetZigbeeConnectivity", call: func() error { _, err := server.GetZigbeeConnectivity(); return err }},
+			{name: "GetDevices", call: func() error { _, err := server.GetDevices(); return err }},
+			{name: "GetScenes", call: func() error { _, err := server.GetScenes(); return err }},
+			{name: "GetButtons", call: func() error { _, err := server.GetButtons(); return err }},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				if err := tc.call(); err != nil {
+					t.Fatalf("%s returned error: %v", tc.name, err)
+				}
+			})
+		}
 	}
 	secondURL, err := url.Parse(secondBridge.URL)
 	if err != nil {
