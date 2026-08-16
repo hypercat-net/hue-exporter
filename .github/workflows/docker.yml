@@ -12,20 +12,7 @@ on:
 
 jobs:
   test:
-    name: Test
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Test
-        run: go test ./...
+    uses: ./.github/workflows/go-checks.yml
 
   build:
     name: Build multi-platform image
