@@ -38,9 +38,14 @@ deprecated or archived third-party Hue libraries required).
 | `hue_scene_active` | Gauge | 1 if scene is currently active |
 | `hue_scene_scrapes_failed_total` | Counter | Failed scene scrape count |
 
-## Usage
+## Hue API connection process
 
-### 1. Obtain a Hue application key
+### 1. Enable local network access to the bridge
+
+Ensure the exporter host can reach your Hue Bridge over HTTPS (`443`) on your
+LAN.
+
+### 2. Obtain a Hue application key
 
 ```bash
 # Press the link button on the bridge first, then:
@@ -49,7 +54,24 @@ curl -k -X POST https://<bridge_ip>/api \
   -d '{"devicetype":"hue_exporter#server"}'
 ```
 
-### 2. Create the configuration file
+Copy the `success.username` value from the response; this is your `app_key`.
+
+### 3. Configure TLS trust for the Hue bridge
+
+Hue bridges use self-signed certificates:
+
+* **Quick setup**: set `tls_insecure_skip_verify: true`
+* **Recommended setup**: trust the bridge certificate and set
+  `tls_ca_cert_file`
+
+You can export the bridge certificate with:
+
+```bash
+openssl s_client -showcerts -connect <bridge_ip>:443 </dev/null 2>/dev/null \
+  | openssl x509 -outform PEM > bridge-ca.pem
+```
+
+### 4. Create the configuration file
 
 Copy `hue_exporter.example.yml` to `hue_exporter.yml` and fill in your bridge
 IP and app key:
@@ -65,7 +87,7 @@ tls_insecure_skip_verify: true
 # tls_ca_cert_file: /path/to/bridge-ca.pem
 ```
 
-### 3. Build and run
+### 5. Build and run
 
 ```bash
 go build -o hue-exporter .
@@ -73,6 +95,24 @@ go build -o hue-exporter .
 ```
 
 Metrics are available at `http://localhost:9366/metrics`.
+
+## Release, image tags, and branch protection
+
+* Create release tags using semantic version format, for example `v0.0.1`.
+* Pushing a `v*` tag publishes:
+  * a GitHub release
+  * multi-arch Docker images to `ghcr.io/<owner>/<repo>` with tags:
+    * `v0.0.1`
+    * `0.0.1`
+    * `v0.0`
+    * `0.0`
+    * `latest`
+* Protect the `main` branch in GitHub settings by:
+  * disallowing direct pushes
+  * requiring at least one approving review
+  * requiring CI checks:
+    * `CI / Build and test`
+    * `Build and push Docker image / Build multi-platform image`
 
 ### Flags
 

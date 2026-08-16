@@ -25,8 +25,12 @@ jobs:
       - name: Build
         run: go build ./...
 
-      - name: Test
-        run: go test ./...
+      - name: Test coverage
+        run: |
+          go test ./... -coverprofile=coverage.out
+          total="$(go tool cover -func=coverage.out | awk '/^total:/ {print substr($3, 1, length($3)-1)}')"
+          echo "Total coverage: ${total}%"
+          awk -v cov="$total" 'BEGIN { if (cov + 0 < 70) { exit 1 } }'
 
       - name: Vet
         run: go vet ./...
