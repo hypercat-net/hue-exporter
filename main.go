@@ -12,9 +12,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,19 +49,20 @@ type persistedState struct {
 }
 
 type bridgeStatus struct {
-	Address string
-	Source  string
-	Error   string
+	Address         string
+	Source          string
+	Error           string
+	DiscoveryStatus string
 }
 
 type homePageData struct {
-	BridgeAddress string
-	BridgeSource  string
-	BridgeError   string
-	AppKeySet     bool
-	TLSCACertFile string
-	Message       string
-	ErrorMessage  string
+	BridgeAddress         string
+	BridgeSource          string
+	BridgeDiscoveryStatus string
+	AppKeySet             bool
+	TLSCACertFile         string
+	Message               string
+	ErrorMessage          string
 }
 
 type setupServer struct {
@@ -90,19 +93,20 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!DOCTYPE html>
 <h1>Hue Exporter</h1>
 {{if .Message}}<p style="color: green">{{.Message}}</p>{{end}}
 {{if .ErrorMessage}}<p style="color: red">{{.ErrorMessage}}</p>{{end}}
+<form method="post">
+  <label for="bridge-address">Bridge host/IP:</label>
+  <input id="bridge-address" name="bridge_address" type="text" value="{{.BridgeAddress}}">
+  <button type="submit" formaction="/api/bridge">Save bridge host/IP</button>
+  <button type="submit" formaction="/api/key">Generate and save API key</button>
+  <button type="submit" formaction="/api/cert">Save bridge certificate and update config</button>
+</form>
 <ul>
   <li>Bridge host/IP: {{if .BridgeAddress}}{{.BridgeAddress}}{{else}}not available{{end}}</li>
   <li>Bridge source: {{.BridgeSource}}</li>
-  <li>Bridge discovery status: {{if .BridgeError}}{{.BridgeError}}{{else}}ok{{end}}</li>
+  <li>Bridge discovery status: {{if .BridgeDiscoveryStatus}}{{.BridgeDiscoveryStatus}}{{else}}not attempted{{end}}</li>
   <li>API key set: {{if .AppKeySet}}yes{{else}}no{{end}}</li>
   <li>Bridge certificate file: {{if .TLSCACertFile}}{{.TLSCACertFile}}{{else}}not configured{{end}}</li>
 </ul>
-<form method="post" action="/api/key">
-  <button type="submit">Generate and save API key</button>
-</form>
-<form method="post" action="/api/cert">
-  <button type="submit">Save bridge certificate and update config</button>
-</form>
 <p>Press the link button on the Hue Bridge before generating a key.</p>
 <p><a href="/metrics">Metrics</a></p>
 <p><a href="/healthz">Health</a></p>
@@ -171,25 +175,9 @@ type discoveredBridge struct {
 }
 
 func discoverBridgeIP(client *http.Client, discoveryURL string) (string, error) {
-	resp, err := client.Get(discoveryURL)
+	bridges, err := discoverBridges(client, discoveryURL)
 	if err != nil {
-		return "", fmt.Errorf("discovering Hue bridges: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxDiscoveryResponseBytes))
-		return "", fmt.Errorf("Hue discovery returned status %d: %.200q", resp.StatusCode, string(body))
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxDiscoveryResponseBytes))
-	if err != nil {
-		return "", fmt.Errorf("reading Hue discovery response: %w", err)
-	}
-
-	var bridges []discoveredBridge
-	if err := json.Unmarshal(body, &bridges); err != nil {
-		return "", fmt.Errorf("decoding Hue discovery response: %w", err)
+		return "", err
 	}
 
 	switch len(bridges) {
@@ -201,7 +189,85 @@ func discoverBridgeIP(client *http.Client, discoveryURL string) (string, error) 
 		}
 		return bridges[0].InternalIPAddress, nil
 	default:
-		return "", fmt.Errorf("discovered %d Hue bridges; set bridge_ip in config", len(bridges))
+		return "", fmt.Errorf("discovered %d Hue bridges (%s); set bridge_ip in config", len(bridges), joinDiscoveryBridgeIPs(bridges))
+	}
+}
+
+func discoverBridges(client *http.Client, discoveryURL string) ([]discoveredBridge, error) {
+	resp, err := client.Get(discoveryURL)
+	if err != nil {
+		return nil, fmt.Errorf("discovering Hue bridges: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxDiscoveryResponseBytes))
+		return nil, fmt.Errorf("Hue discovery returned status %d: %.200q", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxDiscoveryResponseBytes))
+	if err != nil {
+		return nil, fmt.Errorf("reading Hue discovery response: %w", err)
+	}
+
+	var bridges []discoveredBridge
+	if err := json.Unmarshal(body, &bridges); err != nil {
+		return nil, fmt.Errorf("decoding Hue discovery response: %w", err)
+	}
+	return bridges, nil
+}
+
+func joinDiscoveryBridgeIPs(bridges []discoveredBridge) string {
+	ips := make([]string, 0, len(bridges))
+	for _, bridge := range bridges {
+		if bridge.InternalIPAddress == "" {
+			ips = append(ips, "<missing ip>")
+			continue
+		}
+		ips = append(ips, bridge.InternalIPAddress)
+	}
+	return strings.Join(ips, ", ")
+}
+
+func discoverBridgeStatus(client *http.Client, discoveryURL string) bridgeStatus {
+	bridges, err := discoverBridges(client, discoveryURL)
+	if err != nil {
+		return bridgeStatus{
+			Source:          "discovered",
+			Error:           err.Error(),
+			DiscoveryStatus: err.Error(),
+		}
+	}
+
+	switch len(bridges) {
+	case 0:
+		msg := "no Hue bridges discovered; set bridge_ip in config"
+		return bridgeStatus{
+			Source:          "discovered",
+			Error:           msg,
+			DiscoveryStatus: msg,
+		}
+	case 1:
+		if bridges[0].InternalIPAddress == "" {
+			msg := "Hue discovery response missing internal IP address"
+			return bridgeStatus{
+				Source:          "discovered",
+				Error:           msg,
+				DiscoveryStatus: msg,
+			}
+		}
+		return bridgeStatus{
+			Address:         bridges[0].InternalIPAddress,
+			Source:          "discovered",
+			DiscoveryStatus: fmt.Sprintf("discovered 1 Hue bridge: %s", bridges[0].InternalIPAddress),
+		}
+	default:
+		msg := fmt.Sprintf("discovered %d Hue bridges (%s); set bridge_ip in config", len(bridges), joinDiscoveryBridgeIPs(bridges))
+		return bridgeStatus{
+			Source:          "discovered",
+			Error:           msg,
+			DiscoveryStatus: msg,
+		}
 	}
 }
 
@@ -213,18 +279,7 @@ func resolveBridgeStatus(client *http.Client, configuredBridge, discoveryURL str
 		}
 	}
 
-	bridgeIP, err := discoverBridgeIP(client, discoveryURL)
-	if err != nil {
-		return bridgeStatus{
-			Source: "discovered",
-			Error:  err.Error(),
-		}
-	}
-
-	return bridgeStatus{
-		Address: bridgeIP,
-		Source:  "discovered",
-	}
+	return discoverBridgeStatus(client, discoveryURL)
 }
 
 func resolveBridgeStatusWithPersisted(client *http.Client, configuredBridge, persistedBridge, discoveryURL string) bridgeStatus {
@@ -329,6 +384,61 @@ func (s *setupServer) persistBridgeIPLocked(bridgeIP string) error {
 	return saveConfig(s.configPath, &s.config)
 }
 
+func normalizeBridgeAddress(raw string) (string, error) {
+	bridgeAddress := strings.TrimSpace(raw)
+	if bridgeAddress == "" {
+		return "", fmt.Errorf("bridge host/IP is required")
+	}
+	if strings.Contains(bridgeAddress, "://") {
+		parsed, err := url.Parse(bridgeAddress)
+		if err != nil {
+			return "", fmt.Errorf("invalid bridge host/IP %q: %w", raw, err)
+		}
+		if parsed.Host == "" {
+			return "", fmt.Errorf("invalid bridge host/IP %q", raw)
+		}
+		bridgeAddress = parsed.Host
+	}
+	if strings.ContainsRune(bridgeAddress, '/') {
+		return "", fmt.Errorf("invalid bridge host/IP %q", raw)
+	}
+	return bridgeAddress, nil
+}
+
+func (s *setupServer) persistConfiguredBridgeAddress(bridgeAddress string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.configuredBridge = bridgeAddress
+	s.bridge = bridgeStatus{
+		Address: bridgeAddress,
+		Source:  "configured",
+	}
+	s.config.BridgeIP = bridgeAddress
+	s.config.State.BridgeIP = bridgeAddress
+	return saveConfig(s.configPath, &s.config)
+}
+
+func (s *setupServer) bridgeStatusForRequest(r *http.Request) (bridgeStatus, error) {
+	if err := r.ParseForm(); err != nil {
+		return bridgeStatus{}, fmt.Errorf("parsing form: %w", err)
+	}
+	if rawBridgeAddress := r.FormValue("bridge_address"); rawBridgeAddress != "" {
+		bridgeAddress, err := normalizeBridgeAddress(rawBridgeAddress)
+		if err != nil {
+			return bridgeStatus{}, err
+		}
+		if err := s.persistConfiguredBridgeAddress(bridgeAddress); err != nil {
+			return bridgeStatus{}, err
+		}
+		return bridgeStatus{
+			Address: bridgeAddress,
+			Source:  "configured",
+		}, nil
+	}
+	return s.ensureBridgeStatus()
+}
+
 func (s *setupServer) ensureBridgeStatus() (bridgeStatus, error) {
 	s.mu.RLock()
 	bridge := s.bridge
@@ -428,7 +538,7 @@ func (s *setupServer) handleSaveBridgeCertificate(w http.ResponseWriter, r *http
 		return
 	}
 
-	bridge, err := s.ensureBridgeStatus()
+	bridge, err := s.bridgeStatusForRequest(r)
 	if err != nil {
 		s.renderHome(w, "", fmt.Sprintf("failed to prepare bridge status: %v", err))
 		return
@@ -449,6 +559,21 @@ func (s *setupServer) handleSaveBridgeCertificate(w http.ResponseWriter, r *http
 	}
 
 	s.renderHome(w, "Bridge certificate saved and config updated.", "")
+}
+
+func (s *setupServer) handleSaveBridgeAddress(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	bridge, err := s.bridgeStatusForRequest(r)
+	if err != nil {
+		s.renderHome(w, "", fmt.Sprintf("failed to save bridge host/IP: %v", err))
+		return
+	}
+
+	s.renderHome(w, fmt.Sprintf("Bridge host/IP saved: %s.", bridge.Address), "")
 }
 
 func (s *setupServer) bridgeClient() (*hue.Client, bridgeStatus, error) {
@@ -576,13 +701,13 @@ func (s *setupServer) pageData(message, errorMessage string) homePageData {
 	defer s.mu.RUnlock()
 
 	return homePageData{
-		BridgeAddress: s.bridge.Address,
-		BridgeSource:  s.bridge.Source,
-		BridgeError:   s.bridge.Error,
-		AppKeySet:     s.appKey != "",
-		TLSCACertFile: s.config.TLSCACertFile,
-		Message:       message,
-		ErrorMessage:  errorMessage,
+		BridgeAddress:         s.bridge.Address,
+		BridgeSource:          s.bridge.Source,
+		BridgeDiscoveryStatus: s.bridge.DiscoveryStatus,
+		AppKeySet:             s.appKey != "",
+		TLSCACertFile:         s.config.TLSCACertFile,
+		Message:               message,
+		ErrorMessage:          errorMessage,
 	}
 }
 
@@ -615,7 +740,7 @@ func (s *setupServer) handleGenerateAppKey(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	bridge, err := s.ensureBridgeStatus()
+	bridge, err := s.bridgeStatusForRequest(r)
 	if err != nil {
 		s.renderHome(w, "", fmt.Sprintf("failed to prepare bridge status: %v", err))
 		return
@@ -668,6 +793,7 @@ func newMux(server *setupServer, setupUIEnabled bool) *http.ServeMux {
 		_, _ = w.Write([]byte("ok"))
 	})
 	if setupUIEnabled {
+		mux.HandleFunc("/api/bridge", server.handleSaveBridgeAddress)
 		mux.HandleFunc("/api/key", server.handleGenerateAppKey)
 		mux.HandleFunc("/api/cert", server.handleSaveBridgeCertificate)
 		mux.HandleFunc("/", server.handleHome)
