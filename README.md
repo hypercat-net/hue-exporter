@@ -57,6 +57,12 @@ IP and app key:
 ```yaml
 bridge_ip: 192.168.1.2
 app_key: "your-app-key-here"
+
+# Hue bridges use self-signed TLS certificates. Choose one:
+# Option A: skip TLS verification (quick, less secure)
+tls_insecure_skip_verify: true
+# Option B: provide the bridge CA certificate (recommended)
+# tls_ca_cert_file: /path/to/bridge-ca.pem
 ```
 
 ### 3. Build and run

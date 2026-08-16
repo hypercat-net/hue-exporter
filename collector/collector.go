@@ -3,6 +3,7 @@ package collector
 
 import (
 	"math"
+	"sync"
 
 	"github.com/hypercat-net/hue-exporter/hue"
 	"github.com/prometheus/client_golang/prometheus"
@@ -13,6 +14,7 @@ const namespace = "hue"
 // HueCollector collects metrics from a Hue bridge via the CLIP v2 API.
 type HueCollector struct {
 	bridge hue.Bridge
+	mu     sync.Mutex
 
 	// lights
 	lightOn               *prometheus.GaugeVec
@@ -240,6 +242,10 @@ func (c *HueCollector) Describe(ch chan<- *prometheus.Desc) {
 
 // Collect fetches metrics from the Hue bridge and sends them to the channel.
 func (c *HueCollector) Collect(ch chan<- prometheus.Metric) {
+	// Serialize concurrent scrapes so that Reset-populate-Collect is atomic.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	// Reset all GaugeVecs so removed resources don't linger.
 	c.lightOn.Reset()
 	c.lightBrightness.Reset()

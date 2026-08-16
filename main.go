@@ -15,8 +15,17 @@ import (
 
 // Config holds the exporter configuration loaded from a YAML file.
 type Config struct {
-	BridgeIP string `yaml:"bridge_ip"`
-	AppKey   string `yaml:"app_key"`
+	BridgeIP             string `yaml:"bridge_ip"`
+	AppKey               string `yaml:"app_key"`
+	// TLSInsecureSkipVerify disables TLS certificate verification when connecting
+	// to the bridge. Hue bridges use self-signed certificates, so this is
+	// typically required unless you provide the bridge CA certificate via
+	// TLSCACertFile.
+	TLSInsecureSkipVerify bool   `yaml:"tls_insecure_skip_verify"`
+	// TLSCACertFile is the path to a PEM-encoded CA certificate file used to
+	// verify the bridge's TLS certificate. When set, TLSInsecureSkipVerify is
+	// ignored.
+	TLSCACertFile string `yaml:"tls_ca_cert_file"`
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -48,7 +57,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	bridge := hue.NewClient(cfg.BridgeIP, cfg.AppKey)
+	opts := hue.ClientOptions{
+		InsecureSkipVerify: cfg.TLSInsecureSkipVerify,
+	}
+	if cfg.TLSCACertFile != "" {
+		caCert, err := os.ReadFile(cfg.TLSCACertFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error reading CA cert file: %v\n", err)
+			os.Exit(1)
+		}
+		opts.CACert = caCert
+	}
+
+	bridge, err := hue.NewClient(cfg.BridgeIP, cfg.AppKey, opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error creating Hue client: %v\n", err)
+		os.Exit(1)
+	}
 	col := collector.New(bridge)
 
 	reg := prometheus.NewRegistry()

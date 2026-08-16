@@ -3,6 +3,7 @@ package hue
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -29,16 +30,35 @@ type Client struct {
 	httpClient *http.Client
 }
 
+// ClientOptions holds optional configuration for the Hue client.
+type ClientOptions struct {
+	// InsecureSkipVerify disables TLS certificate verification. Set this to
+	// true only when connecting to a bridge with a self-signed certificate and
+	// no CA cert is available.
+	InsecureSkipVerify bool
+	// CACert is a PEM-encoded CA certificate used to verify the bridge's TLS
+	// certificate. When non-nil, InsecureSkipVerify is ignored.
+	CACert []byte
+}
+
 // NewClient creates a new Hue v2 API client.
 //
 // bridgeIP is the IP address or hostname of the bridge.
 // appKey is the Hue application key (formerly called "username" in v1).
-// The client skips TLS certificate verification because Hue bridges use
-// self-signed certificates.
-func NewClient(bridgeIP, appKey string) *Client {
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // Bridge uses self-signed cert
+func NewClient(bridgeIP, appKey string, opts ClientOptions) (*Client, error) {
+	tlsCfg := &tls.Config{}
+
+	if len(opts.CACert) > 0 {
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(opts.CACert) {
+			return nil, fmt.Errorf("failed to parse CA certificate")
+		}
+		tlsCfg.RootCAs = pool
+	} else if opts.InsecureSkipVerify {
+		tlsCfg.InsecureSkipVerify = true //nolint:gosec // Explicitly requested by caller for self-signed bridge cert
 	}
+
+	transport := &http.Transport{TLSClientConfig: tlsCfg}
 	return &Client{
 		baseURL: fmt.Sprintf("https://%s/clip/v2/resource", bridgeIP),
 		appKey:  appKey,
@@ -46,7 +66,7 @@ func NewClient(bridgeIP, appKey string) *Client {
 			Timeout:   defaultTimeout,
 			Transport: transport,
 		},
-	}
+	}, nil
 }
 
 // get fetches a CLIP v2 resource endpoint and decodes the response.
