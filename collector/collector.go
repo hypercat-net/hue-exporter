@@ -17,12 +17,12 @@ type HueCollector struct {
 	mu     sync.Mutex
 
 	// lights
-	lightOn               *prometheus.GaugeVec
-	lightBrightness       *prometheus.GaugeVec
-	lightColorTemp        *prometheus.GaugeVec
-	lightColorX           *prometheus.GaugeVec
-	lightColorY           *prometheus.GaugeVec
-	lightScrapesTotal     prometheus.Counter
+	lightOn           *prometheus.GaugeVec
+	lightBrightness   *prometheus.GaugeVec
+	lightColorTemp    *prometheus.GaugeVec
+	lightColorX       *prometheus.GaugeVec
+	lightColorY       *prometheus.GaugeVec
+	lightScrapesTotal prometheus.Counter
 
 	// grouped lights
 	groupedLightOn           *prometheus.GaugeVec
@@ -30,29 +30,29 @@ type HueCollector struct {
 	groupedLightScrapesTotal prometheus.Counter
 
 	// motion sensors
-	motionDetected      *prometheus.GaugeVec
-	motionEnabled       *prometheus.GaugeVec
-	motionScrapesTotal  prometheus.Counter
+	motionDetected     *prometheus.GaugeVec
+	motionEnabled      *prometheus.GaugeVec
+	motionScrapesTotal prometheus.Counter
 
 	// temperature sensors
-	temperatureCelsius       *prometheus.GaugeVec
-	temperatureScrapesTotal  prometheus.Counter
+	temperatureCelsius      *prometheus.GaugeVec
+	temperatureScrapesTotal prometheus.Counter
 
 	// light-level sensors
-	lightLevelLux            *prometheus.GaugeVec
-	lightLevelScrapesTotal   prometheus.Counter
+	lightLevelLux          *prometheus.GaugeVec
+	lightLevelScrapesTotal prometheus.Counter
 
 	// device power
-	deviceBatteryLevel       *prometheus.GaugeVec
-	deviceScrapesTotal       prometheus.Counter
+	deviceBatteryLevel *prometheus.GaugeVec
+	deviceScrapesTotal prometheus.Counter
 
 	// Zigbee connectivity
-	zigbeeConnected          *prometheus.GaugeVec
-	zigbeeScrapesTotal       prometheus.Counter
+	zigbeeConnected    *prometheus.GaugeVec
+	zigbeeScrapesTotal prometheus.Counter
 
 	// scenes
-	sceneActive             *prometheus.GaugeVec
-	sceneScrapesTotal       prometheus.Counter
+	sceneActive       *prometheus.GaugeVec
+	sceneScrapesTotal prometheus.Counter
 }
 
 // New creates a new HueCollector.

@@ -26,20 +26,20 @@ type mockBridge struct {
 	buttons            []hue.Button
 }
 
-func (m *mockBridge) GetLights() ([]hue.Light, error)                     { return m.lights, nil }
-func (m *mockBridge) GetGroupedLights() ([]hue.GroupedLight, error)       { return m.groupedLights, nil }
-func (m *mockBridge) GetRooms() ([]hue.Room, error)                       { return m.rooms, nil }
-func (m *mockBridge) GetZones() ([]hue.Zone, error)                       { return m.zones, nil }
-func (m *mockBridge) GetMotion() ([]hue.Motion, error)                    { return m.motion, nil }
-func (m *mockBridge) GetTemperature() ([]hue.Temperature, error)          { return m.temperature, nil }
-func (m *mockBridge) GetLightLevel() ([]hue.LightLevel, error)            { return m.lightLevel, nil }
-func (m *mockBridge) GetDevicePower() ([]hue.DevicePower, error)          { return m.devicePower, nil }
+func (m *mockBridge) GetLights() ([]hue.Light, error)               { return m.lights, nil }
+func (m *mockBridge) GetGroupedLights() ([]hue.GroupedLight, error) { return m.groupedLights, nil }
+func (m *mockBridge) GetRooms() ([]hue.Room, error)                 { return m.rooms, nil }
+func (m *mockBridge) GetZones() ([]hue.Zone, error)                 { return m.zones, nil }
+func (m *mockBridge) GetMotion() ([]hue.Motion, error)              { return m.motion, nil }
+func (m *mockBridge) GetTemperature() ([]hue.Temperature, error)    { return m.temperature, nil }
+func (m *mockBridge) GetLightLevel() ([]hue.LightLevel, error)      { return m.lightLevel, nil }
+func (m *mockBridge) GetDevicePower() ([]hue.DevicePower, error)    { return m.devicePower, nil }
 func (m *mockBridge) GetZigbeeConnectivity() ([]hue.ZigbeeConnectivity, error) {
 	return m.zigbeeConnectivity, nil
 }
-func (m *mockBridge) GetDevices() ([]hue.Device, error)  { return m.devices, nil }
-func (m *mockBridge) GetScenes() ([]hue.Scene, error)    { return m.scenes, nil }
-func (m *mockBridge) GetButtons() ([]hue.Button, error)  { return m.buttons, nil }
+func (m *mockBridge) GetDevices() ([]hue.Device, error) { return m.devices, nil }
+func (m *mockBridge) GetScenes() ([]hue.Scene, error)   { return m.scenes, nil }
+func (m *mockBridge) GetButtons() ([]hue.Button, error) { return m.buttons, nil }
 
 func newTestRegistry(bridge hue.Bridge) *prometheus.Registry {
 	reg := prometheus.NewRegistry()
