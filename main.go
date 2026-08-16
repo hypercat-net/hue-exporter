@@ -36,7 +36,8 @@ type Config struct {
 }
 
 type persistedState struct {
-	AppKey string `yaml:"app_key"`
+	BridgeIP string `yaml:"bridge_ip,omitempty"`
+	AppKey   string `yaml:"app_key,omitempty"`
 }
 
 type bridgeStatus struct {
@@ -206,6 +207,22 @@ func resolveBridgeStatus(client *http.Client, configuredBridge, discoveryURL str
 	}
 }
 
+func resolveBridgeStatusWithPersisted(client *http.Client, configuredBridge, persistedBridge, discoveryURL string) bridgeStatus {
+	if configuredBridge != "" {
+		return bridgeStatus{
+			Address: configuredBridge,
+			Source:  "configured",
+		}
+	}
+	if persistedBridge != "" {
+		return bridgeStatus{
+			Address: persistedBridge,
+			Source:  "persisted",
+		}
+	}
+	return resolveBridgeStatus(client, "", discoveryURL)
+}
+
 func runHealthcheck(target string) error {
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(target)
@@ -233,15 +250,10 @@ func buildClientOptions(cfg *Config) (hue.ClientOptions, error) {
 	return opts, nil
 }
 
-func newMetricsHandler(bridgeAddress, appKey string, opts hue.ClientOptions) (http.Handler, error) {
-	bridge, err := hue.NewClient(bridgeAddress, appKey, opts)
-	if err != nil {
-		return nil, fmt.Errorf("creating Hue client: %w", err)
-	}
-
+func newMetricsHandler(bridge hue.Bridge) http.Handler {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collector.New(bridge))
-	return promhttp.HandlerFor(reg, promhttp.HandlerOpts{}), nil
+	return promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
 }
 
 func newSetupServer(cfg *Config, storagePath string, opts hue.ClientOptions, discoveryURL string) (*setupServer, error) {
@@ -259,15 +271,19 @@ func newSetupServer(cfg *Config, storagePath string, opts hue.ClientOptions, dis
 		createAppKey: func(bridgeAddress string) (string, error) {
 			return hue.CreateAppKey(bridgeAddress, defaultDeviceType, opts)
 		},
+		appKey: state.AppKey,
 	}
-	srv.bridge = resolveBridgeStatus(srv.discoveryClient, cfg.BridgeIP, discoveryURL)
+	srv.bridge = resolveBridgeStatusWithPersisted(srv.discoveryClient, cfg.BridgeIP, state.BridgeIP, discoveryURL)
 
 	appKey := cfg.AppKey
 	if appKey == "" {
 		appKey = state.AppKey
 	}
-	if err := srv.setAppKeyLocked(appKey); err != nil {
-		return nil, err
+	srv.setAppKeyLocked(appKey)
+	if cfg.BridgeIP == "" && srv.bridge.Source == "discovered" {
+		if err := srv.persistBridgeIPLocked(srv.bridge.Address); err != nil {
+			return nil, err
+		}
 	}
 
 	return srv, nil
@@ -275,43 +291,54 @@ func newSetupServer(cfg *Config, storagePath string, opts hue.ClientOptions, dis
 
 // setAppKeyLocked updates the effective app key and metrics handler.
 // Concurrent callers must hold s.mu.
-func (s *setupServer) setAppKeyLocked(appKey string) error {
-	var handler http.Handler
-	var err error
-	if appKey != "" && s.bridge.Address != "" {
-		handler, err = newMetricsHandler(s.bridge.Address, appKey, s.opts)
-		if err != nil {
-			return err
-		}
-	}
-
+func (s *setupServer) setAppKeyLocked(appKey string) {
 	s.appKey = appKey
-	s.metricsHandler = handler
-	return nil
+	if appKey == "" {
+		s.metricsHandler = nil
+		return
+	}
+	s.metricsHandler = newMetricsHandler(s)
+}
+
+func (s *setupServer) persistBridgeIPLocked(bridgeIP string) error {
+	if s.storagePath == "" {
+		return nil
+	}
+	state := &persistedState{
+		BridgeIP: bridgeIP,
+		AppKey:   s.appKey,
+	}
+	return savePersistedState(s.storagePath, state)
 }
 
 func (s *setupServer) ensureBridgeStatus() (bridgeStatus, error) {
 	s.mu.RLock()
-	if s.bridge.Address != "" {
-		bridge := s.bridge
-		s.mu.RUnlock()
-		return bridge, nil
-	}
+	bridge := s.bridge
 	configuredBridge := s.configuredBridge
-	discoveryClient := s.discoveryClient
-	discoveryURL := s.discoveryURL
 	s.mu.RUnlock()
 
-	resolved := resolveBridgeStatus(discoveryClient, configuredBridge, discoveryURL)
+	if bridge.Address != "" {
+		return bridge, nil
+	}
+	if configuredBridge != "" {
+		return bridgeStatus{
+			Address: configuredBridge,
+			Source:  "configured",
+		}, nil
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.bridge.Address != "" {
 		return s.bridge, nil
 	}
+
+	resolved := resolveBridgeStatus(s.discoveryClient, "", s.discoveryURL)
 	s.bridge = resolved
-	if err := s.setAppKeyLocked(s.appKey); err != nil {
-		return s.bridge, err
+	if resolved.Address != "" {
+		if err := s.persistBridgeIPLocked(resolved.Address); err != nil {
+			return s.bridge, err
+		}
 	}
 	return s.bridge, nil
 }
@@ -320,10 +347,159 @@ func (s *setupServer) persistGeneratedAppKey(appKey string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := savePersistedState(s.storagePath, &persistedState{AppKey: appKey}); err != nil {
+	if err := savePersistedState(s.storagePath, &persistedState{
+		BridgeIP: s.bridge.Address,
+		AppKey:   appKey,
+	}); err != nil {
 		return err
 	}
-	return s.setAppKeyLocked(appKey)
+	s.setAppKeyLocked(appKey)
+	return nil
+}
+
+func (s *setupServer) rediscoverBridge() (bridgeStatus, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.configuredBridge != "" {
+		return s.bridge, nil
+	}
+
+	resolved := resolveBridgeStatus(s.discoveryClient, "", s.discoveryURL)
+	if resolved.Address == "" {
+		if s.bridge.Address != "" {
+			s.bridge.Error = resolved.Error
+			return s.bridge, fmt.Errorf(resolved.Error)
+		}
+		s.bridge = resolved
+		return s.bridge, fmt.Errorf(resolved.Error)
+	}
+
+	s.bridge = resolved
+	if err := s.persistBridgeIPLocked(resolved.Address); err != nil {
+		return s.bridge, err
+	}
+	return s.bridge, nil
+}
+
+func (s *setupServer) bridgeClient() (*hue.Client, bridgeStatus, error) {
+	bridge, err := s.ensureBridgeStatus()
+	if err != nil {
+		return nil, bridge, err
+	}
+
+	s.mu.RLock()
+	appKey := s.appKey
+	opts := s.opts
+	s.mu.RUnlock()
+	if appKey == "" {
+		return nil, bridge, fmt.Errorf("app_key is not configured")
+	}
+
+	client, err := hue.NewClient(bridge.Address, appKey, opts)
+	if err != nil {
+		return nil, bridge, fmt.Errorf("creating Hue client: %w", err)
+	}
+	return client, bridge, nil
+}
+
+func (s *setupServer) shouldRediscover(bridge bridgeStatus, err error) bool {
+	return bridge.Source != "configured" && hue.IsConnectionError(err)
+}
+
+func fetchWithRediscovery[T any](s *setupServer, getter func(*hue.Client) ([]T, error)) ([]T, error) {
+	client, bridge, err := s.bridgeClient()
+	if err != nil {
+		return nil, err
+	}
+
+	items, err := getter(client)
+	if err == nil || !s.shouldRediscover(bridge, err) {
+		return items, err
+	}
+
+	rediscovered, rediscoverErr := s.rediscoverBridge()
+	if rediscoverErr != nil || rediscovered.Address == "" {
+		return nil, err
+	}
+
+	client, _, clientErr := s.bridgeClient()
+	if clientErr != nil {
+		return nil, clientErr
+	}
+	return getter(client)
+}
+
+func (s *setupServer) GetLights() ([]hue.Light, error) {
+	return fetchWithRediscovery(s, func(client *hue.Client) ([]hue.Light, error) {
+		return client.GetLights()
+	})
+}
+
+func (s *setupServer) GetGroupedLights() ([]hue.GroupedLight, error) {
+	return fetchWithRediscovery(s, func(client *hue.Client) ([]hue.GroupedLight, error) {
+		return client.GetGroupedLights()
+	})
+}
+
+func (s *setupServer) GetRooms() ([]hue.Room, error) {
+	return fetchWithRediscovery(s, func(client *hue.Client) ([]hue.Room, error) {
+		return client.GetRooms()
+	})
+}
+
+func (s *setupServer) GetZones() ([]hue.Zone, error) {
+	return fetchWithRediscovery(s, func(client *hue.Client) ([]hue.Zone, error) {
+		return client.GetZones()
+	})
+}
+
+func (s *setupServer) GetMotion() ([]hue.Motion, error) {
+	return fetchWithRediscovery(s, func(client *hue.Client) ([]hue.Motion, error) {
+		return client.GetMotion()
+	})
+}
+
+func (s *setupServer) GetTemperature() ([]hue.Temperature, error) {
+	return fetchWithRediscovery(s, func(client *hue.Client) ([]hue.Temperature, error) {
+		return client.GetTemperature()
+	})
+}
+
+func (s *setupServer) GetLightLevel() ([]hue.LightLevel, error) {
+	return fetchWithRediscovery(s, func(client *hue.Client) ([]hue.LightLevel, error) {
+		return client.GetLightLevel()
+	})
+}
+
+func (s *setupServer) GetDevicePower() ([]hue.DevicePower, error) {
+	return fetchWithRediscovery(s, func(client *hue.Client) ([]hue.DevicePower, error) {
+		return client.GetDevicePower()
+	})
+}
+
+func (s *setupServer) GetZigbeeConnectivity() ([]hue.ZigbeeConnectivity, error) {
+	return fetchWithRediscovery(s, func(client *hue.Client) ([]hue.ZigbeeConnectivity, error) {
+		return client.GetZigbeeConnectivity()
+	})
+}
+
+func (s *setupServer) GetDevices() ([]hue.Device, error) {
+	return fetchWithRediscovery(s, func(client *hue.Client) ([]hue.Device, error) {
+		return client.GetDevices()
+	})
+}
+
+func (s *setupServer) GetScenes() ([]hue.Scene, error) {
+	return fetchWithRediscovery(s, func(client *hue.Client) ([]hue.Scene, error) {
+		return client.GetScenes()
+	})
+}
+
+func (s *setupServer) GetButtons() ([]hue.Button, error) {
+	return fetchWithRediscovery(s, func(client *hue.Client) ([]hue.Button, error) {
+		return client.GetButtons()
+	})
 }
 
 func (s *setupServer) pageData(message, errorMessage string) homePageData {

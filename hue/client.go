@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,40 @@ import (
 )
 
 const defaultTimeout = 10 * time.Second
+
+// RequestError describes a failed bridge request.
+type RequestError struct {
+	Path       string
+	StatusCode int
+	Err        error
+}
+
+func (e *RequestError) Error() string {
+	switch {
+	case e == nil:
+		return "<nil>"
+	case e.StatusCode != 0:
+		return fmt.Sprintf("unexpected status %d from %s: %v", e.StatusCode, e.Path, e.Err)
+	case e.Err != nil:
+		return fmt.Sprintf("request to %s failed: %v", e.Path, e.Err)
+	default:
+		return fmt.Sprintf("request to %s failed", e.Path)
+	}
+}
+
+func (e *RequestError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// IsConnectionError reports whether err indicates that the bridge was
+// unreachable before it returned an HTTP response.
+func IsConnectionError(err error) bool {
+	var requestErr *RequestError
+	return errors.As(err, &requestErr) && requestErr != nil && requestErr.Err != nil && requestErr.StatusCode == 0
+}
 
 // apiResponse is the standard envelope returned by every CLIP v2 endpoint.
 type apiResponse[T any] struct {
@@ -148,17 +183,17 @@ func get[T any](c *Client, path string) ([]T, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetching %s: %w", path, err)
+		return nil, &RequestError{Path: path, Err: fmt.Errorf("fetching %s: %w", path, err)}
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("reading body from %s: %w", path, err)
+		return nil, &RequestError{Path: path, Err: fmt.Errorf("reading body from %s: %w", path, err)}
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status %d from %s: %s", resp.StatusCode, path, body)
+		return nil, &RequestError{Path: path, StatusCode: resp.StatusCode, Err: fmt.Errorf("%s", body)}
 	}
 
 	var envelope apiResponse[T]
