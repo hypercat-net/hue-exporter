@@ -183,13 +183,13 @@ func get[T any](c *Client, path string) ([]T, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, &RequestError{Path: path, Err: fmt.Errorf("fetching %s: %w", path, err)}
+		return nil, &RequestError{Path: path, Err: err}
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, &RequestError{Path: path, Err: fmt.Errorf("reading body from %s: %w", path, err)}
+		return nil, &RequestError{Path: path, Err: err}
 	}
 
 	if resp.StatusCode != http.StatusOK {

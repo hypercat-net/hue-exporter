@@ -82,33 +82,31 @@ openssl s_client -showcerts -connect <bridge_ip>:443 </dev/null 2>/dev/null \
   | openssl x509 -outform PEM > bridge-ca.pem
 ```
 
-### 4. Understand config vs persisted state
+### 4. Understand config and runtime state
 
 The exporter does **not** read environment variables for bridge settings or API
 credentials.
 
-There are three separate configuration layers:
+There are two configuration layers:
 
-1. **CLI flags** (`--config.file`, `--storage.file`, `--web.listen-address`)
-   choose file locations and server behavior.
-2. **YAML config file** is user-managed, intended for long-lived settings such
-   as `bridge_ip` and TLS options.
-3. **Persisted state file** is exporter-managed and stores the generated
-   `app_key` plus the last discovered `bridge_ip`.
+1. **CLI flags** (`--config.file`, `--web.listen-address`) choose the config
+   file location and server behavior.
+2. **YAML config file** holds both user-managed settings and exporter-managed
+   runtime state.
 
 Precedence is:
 
 * `bridge_ip` in the YAML config wins
-* otherwise the exporter reuses the persisted `bridge_ip`
+* otherwise the exporter reuses `state.bridge_ip`
 * otherwise it runs Hue discovery
 
 For `app_key`:
 
 * `app_key` in the YAML config wins
-* otherwise the exporter uses the persisted `app_key`
+* otherwise the exporter uses `state.app_key`
 
-The exporter writes updates only to the persisted state file. It does **not**
-rewrite your config YAML.
+When it discovers a bridge or generates an API key, the exporter writes those
+runtime values back into the same YAML file under `state`.
 
 ### 5. Create the configuration file
 
@@ -117,10 +115,10 @@ IP if you want to pin the exporter to a specific bridge. `app_key` is optional
 when you use the setup page:
 
 ```yaml
-# Optional: if omitted, the exporter will use the persisted bridge_ip first,
+# Optional: if omitted, the exporter will use state.bridge_ip first,
 # then auto-discover a single bridge when needed.
 bridge_ip: 192.168.1.2
-# Optional: if omitted, the exporter will use the persisted app_key first.
+# Optional: if omitted, the exporter will use state.app_key first.
 # app_key: "your-app-key-here"
 
 # Hue bridges use self-signed TLS certificates. Choose one:
@@ -128,15 +126,21 @@ bridge_ip: 192.168.1.2
 tls_insecure_skip_verify: true
 # Option B: provide the bridge CA certificate (recommended)
 # tls_ca_cert_file: /path/to/bridge-ca.pem
+
+# Exporter-managed runtime state. You can omit this section and let the
+# exporter create or update it.
+# state:
+#   bridge_ip: 192.168.1.2
+#   app_key: generated-key
 ```
 
-If `bridge_ip` is omitted, the exporter first tries the last persisted bridge
+If `bridge_ip` is omitted, the exporter first tries the last saved
 address and then uses `https://discovery.meethue.com/` when it needs to
 discover a bridge. Auto-discovery succeeds only when exactly one bridge is
 found; if none or multiple bridges are discovered, set `bridge_ip` explicitly.
 
-When the exporter is using a discovered or persisted bridge address and that
-bridge stops responding, it retries discovery and updates the persisted state
+When the exporter is using a discovered or saved bridge address and that bridge
+stops responding, it retries discovery and updates the `state`
 with the new address.
 
 Discovery only resolves the bridge address. After that, the exporter connects
@@ -165,7 +169,6 @@ Desktop for macOS or Windows, networking is more indirect, so setting
 go build -o hue-exporter .
 ./hue-exporter \
   --config.file hue_exporter.yml \
-  --storage.file /data/hue_exporter_state.yml \
   --web.listen-address :9366
 ```
 
@@ -178,11 +181,10 @@ Setup and status are available at `http://localhost:9366/`.
 An example Compose file with a container health check is provided at
 `docker-compose.example.yml`.
 
-The Compose example intentionally keeps responsibilities separate:
+The Compose example uses a single mounted YAML file:
 
-* `./hue_exporter.yml` is bind-mounted read-only as the user-managed config
-* the named `hue-exporter` volume at `/data` stores exporter-managed persisted
-  state (`app_key` and discovered `bridge_ip`)
+* `./hue_exporter.yml` is mounted read-write at `/data/hue_exporter.yml`
+* that file contains both your config and the exporter-managed `state` section
 
 No environment variables are required.
 
@@ -211,7 +213,6 @@ No environment variables are required.
 | Flag | Default | Description |
 |---|---|---|
 | `--config.file` | `hue_exporter.yml` | Path to config file |
-| `--storage.file` | `/data/hue_exporter_state.yml` | Path to the exporter-managed state file used for the generated `app_key` and discovered `bridge_ip` |
 | `--web.listen-address` | `:9366` | Address to listen on |
 | `--healthcheck.target` | (empty) | Probe URL and exit with status 0 when healthy, 1 when unhealthy |
 

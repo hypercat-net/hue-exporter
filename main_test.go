@@ -85,47 +85,51 @@ func TestLoadConfigInvalidYAML(t *testing.T) {
 	}
 }
 
-func TestLoadPersistedStateMissingFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "missing.yml")
+func TestLoadConfigWithPersistedState(t *testing.T) {
+	path := writeTestConfig(t, `
+state:
+  bridge_ip: 192.168.1.2
+  app_key: saved-key
+`)
 
-	state, err := loadPersistedState(path)
+	cfg, err := loadConfig(path)
 	if err != nil {
-		t.Fatalf("loadPersistedState returned error: %v", err)
+		t.Fatalf("loadConfig returned error: %v", err)
 	}
-	if state.AppKey != "" {
-		t.Fatalf("expected empty app key, got: %q", state.AppKey)
+	if cfg.State.BridgeIP != "192.168.1.2" {
+		t.Fatalf("unexpected persisted bridge IP: %q", cfg.State.BridgeIP)
+	}
+	if cfg.State.AppKey != "saved-key" {
+		t.Fatalf("unexpected persisted app key: %q", cfg.State.AppKey)
 	}
 }
 
-func TestSaveAndLoadPersistedState(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state", "hue_exporter_state.yml")
-	want := &persistedState{BridgeIP: "192.168.1.2", AppKey: "saved-key"}
-
-	if err := savePersistedState(path, want); err != nil {
-		t.Fatalf("savePersistedState returned error: %v", err)
+func TestSaveConfigWritesState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config", "hue_exporter.yml")
+	want := &Config{
+		BridgeIP: "bridge.local",
+		State: persistedState{
+			BridgeIP: "192.168.1.2",
+			AppKey:   "saved-key",
+		},
 	}
 
-	got, err := loadPersistedState(path)
+	if err := saveConfig(path, want); err != nil {
+		t.Fatalf("saveConfig returned error: %v", err)
+	}
+
+	got, err := loadConfig(path)
 	if err != nil {
-		t.Fatalf("loadPersistedState returned error: %v", err)
-	}
-	if got.AppKey != want.AppKey {
-		t.Fatalf("unexpected app key: %q", got.AppKey)
+		t.Fatalf("loadConfig returned error: %v", err)
 	}
 	if got.BridgeIP != want.BridgeIP {
 		t.Fatalf("unexpected bridge IP: %q", got.BridgeIP)
 	}
-}
-
-func TestLoadPersistedStateInvalidYAML(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.yml")
-	if err := os.WriteFile(path, []byte("app_key: ["), 0o600); err != nil {
-		t.Fatalf("write state: %v", err)
+	if got.State.AppKey != want.State.AppKey {
+		t.Fatalf("unexpected persisted app key: %q", got.State.AppKey)
 	}
-
-	_, err := loadPersistedState(path)
-	if err == nil || !strings.Contains(err.Error(), "parsing persisted state") {
-		t.Fatalf("expected persisted state parse error, got: %v", err)
+	if got.State.BridgeIP != want.State.BridgeIP {
+		t.Fatalf("unexpected persisted bridge IP: %q", got.State.BridgeIP)
 	}
 }
 
@@ -242,8 +246,8 @@ func TestRunHealthcheckRequestFailure(t *testing.T) {
 }
 
 func TestHomePageShowsBridgeAndAppKeyStatus(t *testing.T) {
-	statePath := filepath.Join(t.TempDir(), "state.yml")
-	server, err := newSetupServer(&Config{BridgeIP: "bridge.local"}, statePath, hue.ClientOptions{}, hueDiscoveryURL)
+	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
+	server, err := newSetupServer(&Config{BridgeIP: "bridge.local"}, configPath, hue.ClientOptions{}, hueDiscoveryURL)
 	if err != nil {
 		t.Fatalf("newSetupServer returned error: %v", err)
 	}
@@ -265,15 +269,22 @@ func TestHomePageShowsBridgeAndAppKeyStatus(t *testing.T) {
 }
 
 func TestNewSetupServerUsesPersistedBridgeIP(t *testing.T) {
-	statePath := filepath.Join(t.TempDir(), "state.yml")
-	if err := savePersistedState(statePath, &persistedState{
-		BridgeIP: "bridge.local",
-		AppKey:   "saved-key",
+	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
+	if err := saveConfig(configPath, &Config{
+		State: persistedState{
+			BridgeIP: "bridge.local",
+			AppKey:   "saved-key",
+		},
 	}); err != nil {
-		t.Fatalf("savePersistedState returned error: %v", err)
+		t.Fatalf("saveConfig returned error: %v", err)
 	}
 
-	server, err := newSetupServer(&Config{}, statePath, hue.ClientOptions{}, hueDiscoveryURL)
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadConfig returned error: %v", err)
+	}
+
+	server, err := newSetupServer(cfg, configPath, hue.ClientOptions{}, hueDiscoveryURL)
 	if err != nil {
 		t.Fatalf("newSetupServer returned error: %v", err)
 	}
@@ -296,8 +307,8 @@ func TestNewSetupServerPersistsDiscoveredBridgeIP(t *testing.T) {
 	}))
 	defer discovery.Close()
 
-	statePath := filepath.Join(t.TempDir(), "state.yml")
-	server, err := newSetupServer(&Config{}, statePath, hue.ClientOptions{}, discovery.URL)
+	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
+	server, err := newSetupServer(&Config{}, configPath, hue.ClientOptions{}, discovery.URL)
 	if err != nil {
 		t.Fatalf("newSetupServer returned error: %v", err)
 	}
@@ -305,18 +316,18 @@ func TestNewSetupServerPersistsDiscoveredBridgeIP(t *testing.T) {
 	if server.bridge.Address != "192.168.1.2" {
 		t.Fatalf("unexpected bridge address: %q", server.bridge.Address)
 	}
-	state, err := loadPersistedState(statePath)
+	cfg, err := loadConfig(configPath)
 	if err != nil {
-		t.Fatalf("loadPersistedState returned error: %v", err)
+		t.Fatalf("loadConfig returned error: %v", err)
 	}
-	if state.BridgeIP != "192.168.1.2" {
-		t.Fatalf("unexpected persisted bridge IP: %q", state.BridgeIP)
+	if cfg.State.BridgeIP != "192.168.1.2" {
+		t.Fatalf("unexpected persisted bridge IP: %q", cfg.State.BridgeIP)
 	}
 }
 
 func TestGenerateAppKeyPersistsState(t *testing.T) {
-	statePath := filepath.Join(t.TempDir(), "state.yml")
-	server, err := newSetupServer(&Config{BridgeIP: "bridge.local"}, statePath, hue.ClientOptions{}, hueDiscoveryURL)
+	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
+	server, err := newSetupServer(&Config{BridgeIP: "bridge.local"}, configPath, hue.ClientOptions{}, hueDiscoveryURL)
 	if err != nil {
 		t.Fatalf("newSetupServer returned error: %v", err)
 	}
@@ -342,21 +353,21 @@ func TestGenerateAppKeyPersistsState(t *testing.T) {
 		t.Fatalf("expected app key status, got: %s", body)
 	}
 
-	state, err := loadPersistedState(statePath)
+	cfg, err := loadConfig(configPath)
 	if err != nil {
-		t.Fatalf("loadPersistedState returned error: %v", err)
+		t.Fatalf("loadConfig returned error: %v", err)
 	}
-	if state.AppKey != "generated-key" {
-		t.Fatalf("unexpected persisted app key: %q", state.AppKey)
+	if cfg.State.AppKey != "generated-key" {
+		t.Fatalf("unexpected persisted app key: %q", cfg.State.AppKey)
 	}
-	if state.BridgeIP != "bridge.local" {
-		t.Fatalf("unexpected persisted bridge IP: %q", state.BridgeIP)
+	if cfg.State.BridgeIP != "bridge.local" {
+		t.Fatalf("unexpected persisted bridge IP: %q", cfg.State.BridgeIP)
 	}
 }
 
 func TestGenerateAppKeyMethodNotAllowed(t *testing.T) {
-	statePath := filepath.Join(t.TempDir(), "state.yml")
-	server, err := newSetupServer(&Config{BridgeIP: "bridge.local"}, statePath, hue.ClientOptions{}, hueDiscoveryURL)
+	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
+	server, err := newSetupServer(&Config{BridgeIP: "bridge.local"}, configPath, hue.ClientOptions{}, hueDiscoveryURL)
 	if err != nil {
 		t.Fatalf("newSetupServer returned error: %v", err)
 	}
@@ -371,8 +382,8 @@ func TestGenerateAppKeyMethodNotAllowed(t *testing.T) {
 }
 
 func TestMetricsUnavailableWithoutAppKey(t *testing.T) {
-	statePath := filepath.Join(t.TempDir(), "state.yml")
-	server, err := newSetupServer(&Config{BridgeIP: "bridge.local"}, statePath, hue.ClientOptions{}, hueDiscoveryURL)
+	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
+	server, err := newSetupServer(&Config{BridgeIP: "bridge.local"}, configPath, hue.ClientOptions{}, hueDiscoveryURL)
 	if err != nil {
 		t.Fatalf("newSetupServer returned error: %v", err)
 	}
@@ -417,8 +428,8 @@ func TestGetLightsRediscoveryUpdatesPersistedBridgeIP(t *testing.T) {
 	}))
 	defer discovery.Close()
 
-	statePath := filepath.Join(t.TempDir(), "state.yml")
-	server, err := newSetupServer(&Config{AppKey: "saved-key", TLSInsecureSkipVerify: true}, statePath, hue.ClientOptions{InsecureSkipVerify: true}, discovery.URL)
+	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
+	server, err := newSetupServer(&Config{AppKey: "saved-key", TLSInsecureSkipVerify: true}, configPath, hue.ClientOptions{InsecureSkipVerify: true}, discovery.URL)
 	if err != nil {
 		t.Fatalf("newSetupServer returned error: %v", err)
 	}
@@ -440,11 +451,11 @@ func TestGetLightsRediscoveryUpdatesPersistedBridgeIP(t *testing.T) {
 		t.Fatalf("unexpected bridge source after rediscovery: %q", server.bridge.Source)
 	}
 
-	state, err := loadPersistedState(statePath)
+	cfg, err := loadConfig(configPath)
 	if err != nil {
-		t.Fatalf("loadPersistedState returned error: %v", err)
+		t.Fatalf("loadConfig returned error: %v", err)
 	}
-	if state.BridgeIP != secondURL.Host {
-		t.Fatalf("unexpected persisted bridge IP after rediscovery: %q", state.BridgeIP)
+	if cfg.State.BridgeIP != secondURL.Host {
+		t.Fatalf("unexpected persisted bridge IP after rediscovery: %q", cfg.State.BridgeIP)
 	}
 }

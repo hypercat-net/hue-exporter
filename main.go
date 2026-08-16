@@ -33,7 +33,8 @@ type Config struct {
 	// TLSCACertFile is the path to a PEM-encoded CA certificate file used to
 	// verify the bridge's TLS certificate. When set, TLSInsecureSkipVerify is
 	// ignored.
-	TLSCACertFile string `yaml:"tls_ca_cert_file"`
+	TLSCACertFile string         `yaml:"tls_ca_cert_file"`
+	State         persistedState `yaml:"state,omitempty"`
 }
 
 type persistedState struct {
@@ -61,7 +62,8 @@ type setupServer struct {
 	configuredBridge string
 	discoveryURL     string
 	discoveryClient  *http.Client
-	storagePath      string
+	configPath       string
+	config           Config
 	opts             hue.ClientOptions
 	createAppKey     func(string) (string, error)
 	bridge           bridgeStatus
@@ -72,7 +74,6 @@ type setupServer struct {
 const (
 	hueDiscoveryURL           = "https://discovery.meethue.com/"
 	maxDiscoveryResponseBytes = 64 * 1024
-	defaultStorageFile        = "/data/hue_exporter_state.yml"
 	defaultDeviceType         = "hue_exporter#server"
 )
 
@@ -111,37 +112,16 @@ func loadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-func loadPersistedState(path string) (*persistedState, error) {
-	if path == "" {
-		return &persistedState{}, nil
-	}
-	data, err := os.ReadFile(path)
+func saveConfig(path string, cfg *Config) error {
+	data, err := yaml.Marshal(cfg)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return &persistedState{}, nil
-		}
-		return nil, fmt.Errorf("reading persisted state %s: %w", path, err)
-	}
-	var state persistedState
-	if err := yaml.Unmarshal(data, &state); err != nil {
-		return nil, fmt.Errorf("parsing persisted state %s: %w", path, err)
-	}
-	return &state, nil
-}
-
-func savePersistedState(path string, state *persistedState) error {
-	if path == "" {
-		return fmt.Errorf("persisted state path is required")
-	}
-	data, err := yaml.Marshal(state)
-	if err != nil {
-		return fmt.Errorf("encoding persisted state %s: %w", path, err)
+		return fmt.Errorf("encoding config %s: %w", path, err)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("creating persisted state directory for %s: %w", path, err)
+		return fmt.Errorf("creating config directory for %s: %w", path, err)
 	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("writing persisted state %s: %w", path, err)
+		return fmt.Errorf("writing config %s: %w", path, err)
 	}
 	return nil
 }
@@ -257,28 +237,24 @@ func newMetricsHandler(bridge hue.Bridge) http.Handler {
 	return promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
 }
 
-func newSetupServer(cfg *Config, storagePath string, opts hue.ClientOptions, discoveryURL string) (*setupServer, error) {
-	state, err := loadPersistedState(storagePath)
-	if err != nil {
-		return nil, err
-	}
-
+func newSetupServer(cfg *Config, configPath string, opts hue.ClientOptions, discoveryURL string) (*setupServer, error) {
 	srv := &setupServer{
 		configuredBridge: cfg.BridgeIP,
 		discoveryURL:     discoveryURL,
 		discoveryClient:  &http.Client{Timeout: 10 * time.Second},
-		storagePath:      storagePath,
+		configPath:       configPath,
+		config:           *cfg,
 		opts:             opts,
 		createAppKey: func(bridgeAddress string) (string, error) {
 			return hue.CreateAppKey(bridgeAddress, defaultDeviceType, opts)
 		},
-		appKey: state.AppKey,
+		appKey: cfg.State.AppKey,
 	}
-	srv.bridge = resolveBridgeStatusWithPersisted(srv.discoveryClient, cfg.BridgeIP, state.BridgeIP, discoveryURL)
+	srv.bridge = resolveBridgeStatusWithPersisted(srv.discoveryClient, cfg.BridgeIP, cfg.State.BridgeIP, discoveryURL)
 
 	appKey := cfg.AppKey
 	if appKey == "" {
-		appKey = state.AppKey
+		appKey = cfg.State.AppKey
 	}
 	srv.setAppKeyLocked(appKey)
 	if cfg.BridgeIP == "" && srv.bridge.Source == "discovered" {
@@ -302,14 +278,11 @@ func (s *setupServer) setAppKeyLocked(appKey string) {
 }
 
 func (s *setupServer) persistBridgeIPLocked(bridgeIP string) error {
-	if s.storagePath == "" {
+	if s.configPath == "" {
 		return nil
 	}
-	state := &persistedState{
-		BridgeIP: bridgeIP,
-		AppKey:   s.appKey,
-	}
-	return savePersistedState(s.storagePath, state)
+	s.config.State.BridgeIP = bridgeIP
+	return saveConfig(s.configPath, &s.config)
 }
 
 func (s *setupServer) ensureBridgeStatus() (bridgeStatus, error) {
@@ -348,10 +321,9 @@ func (s *setupServer) persistGeneratedAppKey(appKey string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := savePersistedState(s.storagePath, &persistedState{
-		BridgeIP: s.bridge.Address,
-		AppKey:   appKey,
-	}); err != nil {
+	s.config.State.BridgeIP = s.bridge.Address
+	s.config.State.AppKey = appKey
+	if err := saveConfig(s.configPath, &s.config); err != nil {
 		return err
 	}
 	s.setAppKeyLocked(appKey)
@@ -606,7 +578,6 @@ func newMux(server *setupServer) *http.ServeMux {
 func main() {
 	listenAddr := flag.String("web.listen-address", ":9366", "Address to listen on for web interface and telemetry.")
 	configFile := flag.String("config.file", "hue_exporter.yml", "Path to the exporter configuration file.")
-	storageFile := flag.String("storage.file", defaultStorageFile, "Path to the persisted state file used for generated API keys.")
 	healthcheckTarget := flag.String("healthcheck.target", "", "Probe URL and exit with status 0 when healthy, 1 when unhealthy.")
 	flag.Parse()
 
@@ -630,7 +601,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	server, err := newSetupServer(cfg, *storageFile, opts, hueDiscoveryURL)
+	server, err := newSetupServer(cfg, *configFile, opts, hueDiscoveryURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

@@ -3,14 +3,11 @@ services:
     image: ghcr.io/hypercat-net/hue-exporter:latest
     container_name: hue-exporter
     command:
-      - --config.file=/config/hue_exporter.yml
-      - --storage.file=/data/hue_exporter_state.yml
+      - --config.file=/data/hue_exporter.yml
       - --web.listen-address=:9366
     volumes:
-      # User-managed config file; the exporter does not rewrite it.
-      - ./hue_exporter.yml:/config/hue_exporter.yml:ro
-      # Exporter-managed state (generated app_key + discovered bridge_ip).
-      - hue-exporter:/data
+      # Single mounted YAML: user-managed settings plus exporter-managed state.
+      - ./hue_exporter.yml:/data/hue_exporter.yml
     ports:
       - "9366:9366"
     restart: unless-stopped
@@ -23,6 +20,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
-
-volumes:
-  hue-exporter:
