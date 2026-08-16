@@ -288,17 +288,10 @@ func (s *setupServer) persistBridgeIPLocked(bridgeIP string) error {
 func (s *setupServer) ensureBridgeStatus() (bridgeStatus, error) {
 	s.mu.RLock()
 	bridge := s.bridge
-	configuredBridge := s.configuredBridge
 	s.mu.RUnlock()
 
 	if bridge.Address != "" {
 		return bridge, nil
-	}
-	if configuredBridge != "" {
-		return bridgeStatus{
-			Address: configuredBridge,
-			Source:  "configured",
-		}, nil
 	}
 
 	s.mu.Lock()

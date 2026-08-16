@@ -405,6 +405,9 @@ func TestGetLightsRediscoveryUpdatesPersistedBridgeIP(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":[{"id":"light-old","metadata":{"name":"Old","archetype":"bulb"},"on":{"on":true}}]}`))
 	}))
+	t.Cleanup(func() {
+		firstBridge.Close()
+	})
 
 	secondBridge := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
