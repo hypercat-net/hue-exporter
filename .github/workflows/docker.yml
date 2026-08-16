@@ -58,8 +58,9 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern=v{{major}}.{{minor}}
             type=semver,pattern={{major}}.{{minor}}
-            # Tag main branch as "edge"
+            # Tag main branch as both "edge" and "latest"
             type=edge,branch=main
+            type=raw,value=latest,enable={{is_default_branch}}
             # Tag every branch push with the short SHA for traceability
             type=sha
 
