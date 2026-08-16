@@ -146,3 +146,10 @@ func TestRunHealthcheckNon2xx(t *testing.T) {
 		t.Fatalf("expected status code error, got: %v", err)
 	}
 }
+
+func TestRunHealthcheckRequestFailure(t *testing.T) {
+	err := runHealthcheck("://bad-url")
+	if err == nil || !strings.Contains(err.Error(), "request failed") {
+		t.Fatalf("expected request failure error, got: %v", err)
+	}
+}

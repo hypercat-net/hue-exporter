@@ -124,7 +124,7 @@ go build -o hue-exporter .
 ```
 
 Metrics are available at `http://localhost:9366/metrics`.
-Health is available at `http://localhost:9366/healthz`.
+Health is available at `http://localhost:9366/healthz` (liveness endpoint).
 
 ### Docker Compose example
 
