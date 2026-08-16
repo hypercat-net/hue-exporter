@@ -157,7 +157,7 @@ An example Compose file with a container health check is provided at
 |---|---|---|
 | `--config.file` | `hue_exporter.yml` | Path to config file |
 | `--web.listen-address` | `:9366` | Address to listen on |
-| `--healthcheck.target` | (empty) | Probe URL and exit with status 0 when healthy |
+| `--healthcheck.target` | (empty) | Probe URL and exit with status 0 when healthy, 1 when unhealthy |
 
 ## Building
 
