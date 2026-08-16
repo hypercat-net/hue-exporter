@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -78,8 +79,8 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!DOCTYPE html>
 <head><title>Hue Exporter</title></head>
 <body>
 <h1>Hue Exporter</h1>
-{{if .Message}}<p>{{.Message}}</p>{{end}}
-{{if .ErrorMessage}}<p>{{.ErrorMessage}}</p>{{end}}
+{{if .Message}}<p style="color: green">{{.Message}}</p>{{end}}
+{{if .ErrorMessage}}<p style="color: red">{{.ErrorMessage}}</p>{{end}}
 <ul>
   <li>Bridge host/IP: {{if .BridgeAddress}}{{.BridgeAddress}}{{else}}not available{{end}}</li>
   <li>Bridge source: {{.BridgeSource}}</li>
@@ -258,21 +259,23 @@ func newSetupServer(cfg *Config, storagePath string, opts hue.ClientOptions, dis
 		createAppKey: func(bridgeAddress string) (string, error) {
 			return hue.CreateAppKey(bridgeAddress, defaultDeviceType, opts)
 		},
-		bridge: resolveBridgeStatus(&http.Client{Timeout: 10 * time.Second}, cfg.BridgeIP, discoveryURL),
 	}
+	srv.bridge = resolveBridgeStatus(srv.discoveryClient, cfg.BridgeIP, discoveryURL)
 
 	appKey := cfg.AppKey
 	if appKey == "" {
 		appKey = state.AppKey
 	}
-	if err := srv.setAppKey(appKey); err != nil {
+	if err := srv.setAppKeyLocked(appKey); err != nil {
 		return nil, err
 	}
 
 	return srv, nil
 }
 
-func (s *setupServer) setAppKey(appKey string) error {
+// setAppKeyLocked updates the effective app key and metrics handler.
+// Concurrent callers must hold s.mu.
+func (s *setupServer) setAppKeyLocked(appKey string) error {
 	var handler http.Handler
 	var err error
 	if appKey != "" && s.bridge.Address != "" {
@@ -288,11 +291,26 @@ func (s *setupServer) setAppKey(appKey string) error {
 }
 
 func (s *setupServer) ensureBridgeStatus() (bridgeStatus, error) {
+	s.mu.RLock()
+	if s.bridge.Address != "" {
+		bridge := s.bridge
+		s.mu.RUnlock()
+		return bridge, nil
+	}
+	configuredBridge := s.configuredBridge
+	discoveryClient := s.discoveryClient
+	discoveryURL := s.discoveryURL
+	s.mu.RUnlock()
+
+	resolved := resolveBridgeStatus(discoveryClient, configuredBridge, discoveryURL)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	s.bridge = resolveBridgeStatus(s.discoveryClient, s.configuredBridge, s.discoveryURL)
-	if err := s.setAppKey(s.appKey); err != nil {
+	if s.bridge.Address != "" {
+		return s.bridge, nil
+	}
+	s.bridge = resolved
+	if err := s.setAppKeyLocked(s.appKey); err != nil {
 		return s.bridge, err
 	}
 	return s.bridge, nil
@@ -305,7 +323,7 @@ func (s *setupServer) persistGeneratedAppKey(appKey string) error {
 	if err := savePersistedState(s.storagePath, &persistedState{AppKey: appKey}); err != nil {
 		return err
 	}
-	return s.setAppKey(appKey)
+	return s.setAppKeyLocked(appKey)
 }
 
 func (s *setupServer) pageData(message, errorMessage string) homePageData {
@@ -323,10 +341,14 @@ func (s *setupServer) pageData(message, errorMessage string) homePageData {
 }
 
 func (s *setupServer) renderHome(w http.ResponseWriter, message, errorMessage string) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := homePageTemplate.Execute(w, s.pageData(message, errorMessage)); err != nil {
+	var buf bytes.Buffer
+	if err := homePageTemplate.Execute(&buf, s.pageData(message, errorMessage)); err != nil {
 		http.Error(w, fmt.Sprintf("rendering home page: %v", err), http.StatusInternalServerError)
+		return
 	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(buf.Bytes())
 }
 
 func (s *setupServer) handleHome(w http.ResponseWriter, r *http.Request) {
