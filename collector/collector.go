@@ -17,12 +17,12 @@ type HueCollector struct {
 	mu     sync.Mutex
 
 	// lights
-	lightOn               *prometheus.GaugeVec
-	lightBrightness       *prometheus.GaugeVec
-	lightColorTemp        *prometheus.GaugeVec
-	lightColorX           *prometheus.GaugeVec
-	lightColorY           *prometheus.GaugeVec
-	lightScrapesTotal     prometheus.Counter
+	lightOn           *prometheus.GaugeVec
+	lightBrightness   *prometheus.GaugeVec
+	lightColorTemp    *prometheus.GaugeVec
+	lightColorX       *prometheus.GaugeVec
+	lightColorY       *prometheus.GaugeVec
+	lightScrapesTotal prometheus.Counter
 
 	// grouped lights
 	groupedLightOn           *prometheus.GaugeVec
@@ -30,36 +30,37 @@ type HueCollector struct {
 	groupedLightScrapesTotal prometheus.Counter
 
 	// motion sensors
-	motionDetected      *prometheus.GaugeVec
-	motionEnabled       *prometheus.GaugeVec
-	motionScrapesTotal  prometheus.Counter
+	motionDetected     *prometheus.GaugeVec
+	motionEnabled      *prometheus.GaugeVec
+	motionScrapesTotal prometheus.Counter
 
 	// temperature sensors
-	temperatureCelsius       *prometheus.GaugeVec
-	temperatureScrapesTotal  prometheus.Counter
+	temperatureCelsius      *prometheus.GaugeVec
+	temperatureScrapesTotal prometheus.Counter
 
 	// light-level sensors
-	lightLevelLux            *prometheus.GaugeVec
-	lightLevelScrapesTotal   prometheus.Counter
+	lightLevelLux          *prometheus.GaugeVec
+	lightLevelScrapesTotal prometheus.Counter
 
 	// device power
-	deviceBatteryLevel       *prometheus.GaugeVec
-	deviceScrapesTotal       prometheus.Counter
+	deviceBatteryLevel *prometheus.GaugeVec
+	deviceScrapesTotal prometheus.Counter
 
 	// Zigbee connectivity
-	zigbeeConnected          *prometheus.GaugeVec
-	zigbeeScrapesTotal       prometheus.Counter
+	zigbeeConnected    *prometheus.GaugeVec
+	zigbeeScrapesTotal prometheus.Counter
 
 	// scenes
-	sceneActive             *prometheus.GaugeVec
-	sceneScrapesTotal       prometheus.Counter
+	sceneActive       *prometheus.GaugeVec
+	sceneScrapesTotal prometheus.Counter
 }
 
 // New creates a new HueCollector.
 func New(bridge hue.Bridge) *HueCollector {
 	lightLabels := []string{"id", "name", "archetype"}
-	groupLabels := []string{"id", "owner_id", "owner_type"}
+	groupLabels := []string{"id", "owner_id", "owner_type", "owner_name"}
 	ownerLabels := []string{"id", "owner_id"}
+	deviceOwnerLabels := []string{"id", "owner_id", "owner_name"}
 	sceneLabels := []string{"id", "name", "group_id", "group_type"}
 
 	return &HueCollector{
@@ -171,7 +172,7 @@ func New(bridge hue.Bridge) *HueCollector {
 			Subsystem: "device",
 			Name:      "battery_level_percent",
 			Help:      "Battery level of the device as a percentage (0–100).",
-		}, ownerLabels),
+		}, deviceOwnerLabels),
 		deviceScrapesTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "device",
@@ -323,6 +324,42 @@ func lightLevelToLux(lightLevel int) float64 {
 	return math.Pow(10, float64(lightLevel-1)/10000)
 }
 
+func resourceKey(rtype, rid string) string {
+	return rtype + ":" + rid
+}
+
+func (c *HueCollector) groupedLightOwnerNames() map[string]string {
+	names := map[string]string{}
+
+	if rooms, err := c.bridge.GetRooms(); err == nil {
+		for _, room := range rooms {
+			names[resourceKey("room", room.ID)] = room.Metadata.Name
+		}
+	}
+
+	if zones, err := c.bridge.GetZones(); err == nil {
+		for _, zone := range zones {
+			names[resourceKey("zone", zone.ID)] = zone.Metadata.Name
+		}
+	}
+
+	return names
+}
+
+func (c *HueCollector) deviceOwnerNames() map[string]string {
+	devices, err := c.bridge.GetDevices()
+	if err != nil {
+		return map[string]string{}
+	}
+
+	names := make(map[string]string, len(devices))
+	for _, device := range devices {
+		names[resourceKey("device", device.ID)] = device.Metadata.Name
+	}
+
+	return names
+}
+
 func (c *HueCollector) collectLights() {
 	lights, err := c.bridge.GetLights()
 	if err != nil {
@@ -355,11 +392,13 @@ func (c *HueCollector) collectGroupedLights() {
 		c.groupedLightScrapesTotal.Add(1)
 		return
 	}
+	ownerNames := c.groupedLightOwnerNames()
 	for _, g := range groups {
 		labels := prometheus.Labels{
 			"id":         g.ID,
 			"owner_id":   g.Owner.RID,
 			"owner_type": g.Owner.RType,
+			"owner_name": ownerNames[resourceKey(g.Owner.RType, g.Owner.RID)],
 		}
 		c.groupedLightOn.With(labels).Set(boolToFloat(g.On.On))
 		if g.Dimming != nil {
@@ -438,13 +477,15 @@ func (c *HueCollector) collectDevicePower() {
 		c.deviceScrapesTotal.Add(1)
 		return
 	}
+	ownerNames := c.deviceOwnerNames()
 	for _, d := range devices {
 		if d.PowerState.BatteryLevel == nil {
 			continue
 		}
 		labels := prometheus.Labels{
-			"id":       d.ID,
-			"owner_id": d.Owner.RID,
+			"id":         d.ID,
+			"owner_id":   d.Owner.RID,
+			"owner_name": ownerNames[resourceKey(d.Owner.RType, d.Owner.RID)],
 		}
 		c.deviceBatteryLevel.With(labels).Set(float64(*d.PowerState.BatteryLevel))
 	}
