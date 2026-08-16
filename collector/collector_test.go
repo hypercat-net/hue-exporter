@@ -200,7 +200,7 @@ func TestGroupedLight(t *testing.T) {
 	expected := `
 # HELP hue_grouped_light_on Whether any light in the group is on (1) or all are off (0).
 # TYPE hue_grouped_light_on gauge
-hue_grouped_light_on{id="group-1",owner_id="room-1",owner_name="Living Room",owner_type="room"} 1
+hue_grouped_light_on{group_id="room-1",group_name="Living Room",group_type="room",id="group-1"} 1
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_grouped_light_on"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
@@ -224,7 +224,7 @@ func TestMotionDetected(t *testing.T) {
 	expected := `
 # HELP hue_motion_detected Whether motion is currently detected (1) or not (0).
 # TYPE hue_motion_detected gauge
-hue_motion_detected{id="motion-1",owner_id="device-1"} 1
+hue_motion_detected{device_id="device-1",id="motion-1"} 1
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_motion_detected"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
@@ -254,7 +254,7 @@ func TestMotionReport(t *testing.T) {
 	expected := `
 # HELP hue_motion_detected Whether motion is currently detected (1) or not (0).
 # TYPE hue_motion_detected gauge
-hue_motion_detected{id="motion-2",owner_id="device-2"} 1
+hue_motion_detected{device_id="device-2",id="motion-2"} 1
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_motion_detected"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
@@ -281,7 +281,7 @@ func TestTemperature(t *testing.T) {
 	expected := `
 # HELP hue_temperature_celsius Current temperature reading in degrees Celsius.
 # TYPE hue_temperature_celsius gauge
-hue_temperature_celsius{id="temp-1",owner_id="device-3"} 21.5
+hue_temperature_celsius{device_id="device-3",id="temp-1"} 21.5
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_temperature_celsius"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
@@ -333,7 +333,7 @@ func TestLightLevel(t *testing.T) {
 	expected := `
 # HELP hue_light_level_lux Current ambient light level in lux.
 # TYPE hue_light_level_lux gauge
-hue_light_level_lux{id="ll-1",owner_id="device-5"} 100
+hue_light_level_lux{device_id="device-5",id="ll-1"} 100
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_light_level_lux"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
@@ -366,7 +366,7 @@ func TestDeviceBattery(t *testing.T) {
 	expected := `
 # HELP hue_device_battery_level_percent Battery level of the device as a percentage (0–100).
 # TYPE hue_device_battery_level_percent gauge
-hue_device_battery_level_percent{id="dp-1",owner_id="device-6",owner_name="Hall Sensor"} 85
+hue_device_battery_level_percent{device_id="device-6",device_name="Hall Sensor",id="dp-1"} 85
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_device_battery_level_percent"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
@@ -416,8 +416,8 @@ func TestZigbeeConnected(t *testing.T) {
 	expected := `
 # HELP hue_zigbee_connected Whether the Zigbee device is connected (1) or not (0).
 # TYPE hue_zigbee_connected gauge
-hue_zigbee_connected{id="zb-1",owner_id="device-8"} 1
-hue_zigbee_connected{id="zb-2",owner_id="device-9"} 0
+hue_zigbee_connected{device_id="device-8",id="zb-1"} 1
+hue_zigbee_connected{device_id="device-9",id="zb-2"} 0
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_zigbee_connected"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)

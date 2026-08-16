@@ -58,9 +58,9 @@ type HueCollector struct {
 // New creates a new HueCollector.
 func New(bridge hue.Bridge) *HueCollector {
 	lightLabels := []string{"id", "name", "archetype"}
-	groupLabels := []string{"id", "owner_id", "owner_type", "owner_name"}
-	ownerLabels := []string{"id", "owner_id"}
-	deviceOwnerLabels := []string{"id", "owner_id", "owner_name"}
+	groupLabels := []string{"id", "group_id", "group_type", "group_name"}
+	deviceLabels := []string{"id", "device_id"}
+	deviceNameLabels := []string{"id", "device_id", "device_name"}
 	sceneLabels := []string{"id", "name", "group_id", "group_name", "group_type"}
 
 	return &HueCollector{
@@ -127,13 +127,13 @@ func New(bridge hue.Bridge) *HueCollector {
 			Subsystem: "motion",
 			Name:      "detected",
 			Help:      "Whether motion is currently detected (1) or not (0).",
-		}, ownerLabels),
+		}, deviceLabels),
 		motionEnabled: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: namespace,
 			Subsystem: "motion",
 			Name:      "enabled",
 			Help:      "Whether the motion sensor is enabled (1) or disabled (0).",
-		}, ownerLabels),
+		}, deviceLabels),
 		motionScrapesTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "motion",
@@ -146,7 +146,7 @@ func New(bridge hue.Bridge) *HueCollector {
 			Subsystem: "temperature",
 			Name:      "celsius",
 			Help:      "Current temperature reading in degrees Celsius.",
-		}, ownerLabels),
+		}, deviceLabels),
 		temperatureScrapesTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "temperature",
@@ -159,7 +159,7 @@ func New(bridge hue.Bridge) *HueCollector {
 			Subsystem: "light_level",
 			Name:      "lux",
 			Help:      "Current ambient light level in lux.",
-		}, ownerLabels),
+		}, deviceLabels),
 		lightLevelScrapesTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "light_level",
@@ -172,7 +172,7 @@ func New(bridge hue.Bridge) *HueCollector {
 			Subsystem: "device",
 			Name:      "battery_level_percent",
 			Help:      "Battery level of the device as a percentage (0–100).",
-		}, deviceOwnerLabels),
+		}, deviceNameLabels),
 		deviceScrapesTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "device",
@@ -185,7 +185,7 @@ func New(bridge hue.Bridge) *HueCollector {
 			Subsystem: "zigbee",
 			Name:      "connected",
 			Help:      "Whether the Zigbee device is connected (1) or not (0).",
-		}, ownerLabels),
+		}, deviceLabels),
 		zigbeeScrapesTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "zigbee",
@@ -396,9 +396,9 @@ func (c *HueCollector) collectGroupedLights() {
 	for _, g := range groups {
 		labels := prometheus.Labels{
 			"id":         g.ID,
-			"owner_id":   g.Owner.RID,
-			"owner_type": g.Owner.RType,
-			"owner_name": ownerNames[resourceKey(g.Owner.RType, g.Owner.RID)],
+			"group_id":   g.Owner.RID,
+			"group_type": g.Owner.RType,
+			"group_name": ownerNames[resourceKey(g.Owner.RType, g.Owner.RID)],
 		}
 		c.groupedLightOn.With(labels).Set(boolToFloat(g.On.On))
 		if g.Dimming != nil {
@@ -415,8 +415,8 @@ func (c *HueCollector) collectMotion() {
 	}
 	for _, s := range sensors {
 		labels := prometheus.Labels{
-			"id":       s.ID,
-			"owner_id": s.Owner.RID,
+			"id":        s.ID,
+			"device_id": s.Owner.RID,
 		}
 		motion := s.Motion.Motion
 		if s.Motion.MotionReport != nil {
@@ -438,8 +438,8 @@ func (c *HueCollector) collectTemperature() {
 			continue
 		}
 		labels := prometheus.Labels{
-			"id":       s.ID,
-			"owner_id": s.Owner.RID,
+			"id":        s.ID,
+			"device_id": s.Owner.RID,
 		}
 		temp := s.Temperature.Temperature
 		if s.Temperature.TemperatureReport != nil {
@@ -460,8 +460,8 @@ func (c *HueCollector) collectLightLevel() {
 			continue
 		}
 		labels := prometheus.Labels{
-			"id":       s.ID,
-			"owner_id": s.Owner.RID,
+			"id":        s.ID,
+			"device_id": s.Owner.RID,
 		}
 		level := s.Light.LightLevel
 		if s.Light.LightLevelReport != nil {
@@ -483,9 +483,9 @@ func (c *HueCollector) collectDevicePower() {
 			continue
 		}
 		labels := prometheus.Labels{
-			"id":         d.ID,
-			"owner_id":   d.Owner.RID,
-			"owner_name": ownerNames[resourceKey(d.Owner.RType, d.Owner.RID)],
+			"id":          d.ID,
+			"device_id":   d.Owner.RID,
+			"device_name": ownerNames[resourceKey(d.Owner.RType, d.Owner.RID)],
 		}
 		c.deviceBatteryLevel.With(labels).Set(float64(*d.PowerState.BatteryLevel))
 	}
@@ -499,8 +499,8 @@ func (c *HueCollector) collectZigbee() {
 	}
 	for _, d := range devices {
 		labels := prometheus.Labels{
-			"id":       d.ID,
-			"owner_id": d.Owner.RID,
+			"id":        d.ID,
+			"device_id": d.Owner.RID,
 		}
 		connected := d.Status == "connected"
 		c.zigbeeConnected.With(labels).Set(boolToFloat(connected))
