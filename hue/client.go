@@ -102,6 +102,42 @@ func newHTTPClient(opts ClientOptions) (*http.Client, error) {
 			return nil, fmt.Errorf("failed to parse CA certificate")
 		}
 		tlsCfg.RootCAs = pool
+		// Hue bridge certificates may omit IP SAN entries. When a bridge is
+		// addressed by IP, validate the certificate chain but skip hostname checks.
+		tlsCfg.InsecureSkipVerify = true //nolint:gosec // Verification is enforced in VerifyConnection below.
+		tlsCfg.VerifyConnection = func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
+				return fmt.Errorf("bridge TLS handshake returned no peer certificates")
+			}
+			baseVerifyOpts := x509.VerifyOptions{
+				Roots:       pool,
+				CurrentTime: time.Now(),
+				KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+			}
+			if len(cs.PeerCertificates) > 1 {
+				intermediatePool := x509.NewCertPool()
+				for _, cert := range cs.PeerCertificates[1:] {
+					intermediatePool.AddCert(cert)
+				}
+				baseVerifyOpts.Intermediates = intermediatePool
+			}
+			verifyOpts := baseVerifyOpts
+			if cs.ServerName != "" {
+				verifyOpts.DNSName = cs.ServerName
+				if _, err := cs.PeerCertificates[0].Verify(verifyOpts); err == nil {
+					return nil
+				} else {
+					var hostErr x509.HostnameError
+					if !errors.As(err, &hostErr) {
+						return fmt.Errorf("verifying bridge certificate: %w", err)
+					}
+				}
+			}
+			if _, err := cs.PeerCertificates[0].Verify(baseVerifyOpts); err != nil {
+				return fmt.Errorf("verifying bridge certificate: %w", err)
+			}
+			return nil
+		}
 	} else if opts.InsecureSkipVerify {
 		tlsCfg.InsecureSkipVerify = true //nolint:gosec // Explicitly requested by caller for self-signed bridge cert
 	}

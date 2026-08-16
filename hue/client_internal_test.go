@@ -1,12 +1,21 @@
 package hue
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestClient(server *httptest.Server) *Client {
@@ -257,4 +266,101 @@ func TestCreateAppKeyAdditionalErrors(t *testing.T) {
 			t.Fatalf("expected decode error, got: %v", err)
 		}
 	})
+}
+
+func TestCreateAppKeyWithCACertAndIPWithoutIPSAN(t *testing.T) {
+	certPEM, tlsCert := createTestBridgeCertificate(t, []string{"bridge.local"})
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"success":{"username":"generated-key"}}]`))
+	}))
+	server.TLS = &tls.Config{Certificates: []tls.Certificate{tlsCert}}
+	server.StartTLS()
+	defer server.Close()
+
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+
+	host, port, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+	if host != "127.0.0.1" {
+		t.Fatalf("unexpected test server host: %s", host)
+	}
+
+	appKey, err := CreateAppKey(net.JoinHostPort("127.0.0.1", port), "hue_exporter#server", ClientOptions{CACert: certPEM})
+	if err != nil {
+		t.Fatalf("CreateAppKey returned error: %v", err)
+	}
+	if appKey != "generated-key" {
+		t.Fatalf("unexpected app key: %q", appKey)
+	}
+}
+
+func TestCreateAppKeyWithCACertAndHostWithoutAnySAN(t *testing.T) {
+	certPEM, tlsCert := createTestBridgeCertificate(t, nil)
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"success":{"username":"generated-key"}}]`))
+	}))
+	server.TLS = &tls.Config{Certificates: []tls.Certificate{tlsCert}}
+	server.StartTLS()
+	defer server.Close()
+
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	_, port, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+
+	appKey, err := CreateAppKey(net.JoinHostPort("localhost", port), "hue_exporter#server", ClientOptions{CACert: certPEM})
+	if err != nil {
+		t.Fatalf("CreateAppKey returned error: %v", err)
+	}
+	if appKey != "generated-key" {
+		t.Fatalf("unexpected app key: %q", appKey)
+	}
+}
+
+func createTestBridgeCertificate(t *testing.T, dnsNames []string) ([]byte, tls.Certificate) {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate private key: %v", err)
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName: "bridge.local",
+		},
+		NotBefore:   time.Now().Add(-time.Hour),
+		NotAfter:    time.Now().Add(24 * time.Hour),
+		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment | x509.KeyUsageCertSign,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IsCA:        true,
+		DNSNames:    dnsNames,
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+
+	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("create TLS key pair: %v", err)
+	}
+
+	return certPEM, tlsCert
 }
