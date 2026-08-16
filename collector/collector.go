@@ -425,9 +425,13 @@ func (c *HueCollector) collectMotion(ownerNames map[string]string) {
 		return
 	}
 	for _, s := range sensors {
+		deviceName := ownerNames[resourceKey(s.Owner.RType, s.Owner.RID)]
+		if deviceName == "" {
+			continue
+		}
 		labels := prometheus.Labels{
 			"id":          s.ID,
-			"device_name": ownerNames[resourceKey(s.Owner.RType, s.Owner.RID)],
+			"device_name": deviceName,
 		}
 		motion := s.Motion.Motion
 		if s.Motion.MotionReport != nil {
@@ -448,9 +452,13 @@ func (c *HueCollector) collectTemperature(ownerNames map[string]string) {
 		if !s.Temperature.TemperatureValid {
 			continue
 		}
+		deviceName := ownerNames[resourceKey(s.Owner.RType, s.Owner.RID)]
+		if deviceName == "" {
+			continue
+		}
 		labels := prometheus.Labels{
 			"id":          s.ID,
-			"device_name": ownerNames[resourceKey(s.Owner.RType, s.Owner.RID)],
+			"device_name": deviceName,
 		}
 		temp := s.Temperature.Temperature
 		if s.Temperature.TemperatureReport != nil {
@@ -470,9 +478,13 @@ func (c *HueCollector) collectLightLevel(ownerNames map[string]string) {
 		if !s.Light.LightLevelValid {
 			continue
 		}
+		deviceName := ownerNames[resourceKey(s.Owner.RType, s.Owner.RID)]
+		if deviceName == "" {
+			continue
+		}
 		labels := prometheus.Labels{
 			"id":          s.ID,
-			"device_name": ownerNames[resourceKey(s.Owner.RType, s.Owner.RID)],
+			"device_name": deviceName,
 		}
 		level := s.Light.LightLevel
 		if s.Light.LightLevelReport != nil {
@@ -492,9 +504,13 @@ func (c *HueCollector) collectDevicePower(ownerNames map[string]string) {
 		if d.PowerState.BatteryLevel == nil {
 			continue
 		}
+		deviceName := ownerNames[resourceKey(d.Owner.RType, d.Owner.RID)]
+		if deviceName == "" {
+			continue
+		}
 		labels := prometheus.Labels{
 			"id":          d.ID,
-			"device_name": ownerNames[resourceKey(d.Owner.RType, d.Owner.RID)],
+			"device_name": deviceName,
 		}
 		c.deviceBatteryLevel.With(labels).Set(float64(*d.PowerState.BatteryLevel))
 	}
@@ -507,9 +523,13 @@ func (c *HueCollector) collectZigbee(ownerNames map[string]string) {
 		return
 	}
 	for _, d := range devices {
+		deviceName := ownerNames[resourceKey(d.Owner.RType, d.Owner.RID)]
+		if deviceName == "" {
+			continue
+		}
 		labels := prometheus.Labels{
 			"id":          d.ID,
-			"device_name": ownerNames[resourceKey(d.Owner.RType, d.Owner.RID)],
+			"device_name": deviceName,
 		}
 		connected := d.Status == "connected"
 		c.zigbeeConnected.With(labels).Set(boolToFloat(connected))

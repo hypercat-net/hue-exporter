@@ -291,6 +291,26 @@ hue_motion_detected{device_name="Kitchen Sensor",id="motion-2"} 1
 	}
 }
 
+func TestMotionMissingDeviceNameSkipped(t *testing.T) {
+	bridge := &mockBridge{
+		motion: []hue.Motion{
+			{
+				ID:      "motion-3",
+				Enabled: true,
+				Motion:  hue.MotionSensor{Motion: true},
+				Owner:   hue.ResourceRef{RID: "device-missing", RType: "device"},
+			},
+		},
+	}
+
+	reg := newTestRegistry(bridge)
+
+	expected := ``
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_motion_detected"); err != nil {
+		t.Errorf("unexpected metrics: %v", err)
+	}
+}
+
 func TestTemperature(t *testing.T) {
 	bridge := &mockBridge{
 		temperature: []hue.Temperature{
