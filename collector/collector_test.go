@@ -497,3 +497,23 @@ hue_scene_active{group_name="Living Room",group_type="room",id="scene-2",name="C
 		t.Errorf("unexpected metrics: %v", err)
 	}
 }
+
+func TestScenePrivateGroupSkipped(t *testing.T) {
+	bridge := &mockBridge{
+		scenes: []hue.Scene{
+			{
+				ID:       "scene-3",
+				Metadata: hue.Metadata{Name: "Hidden"},
+				Group:    hue.ResourceRef{RID: "private-group-1", RType: "private_group"},
+				Status:   hue.SceneStatus{Active: "static"},
+			},
+		},
+	}
+
+	reg := newTestRegistry(bridge)
+
+	expected := ``
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_scene_active"); err != nil {
+		t.Errorf("unexpected metrics: %v", err)
+	}
+}

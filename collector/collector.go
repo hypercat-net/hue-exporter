@@ -330,6 +330,10 @@ func resourceKey(rtype, rid string) string {
 	return rtype + ":" + rid
 }
 
+func isIgnoredGroupType(rtype string) bool {
+	return rtype == "private_group"
+}
+
 func (c *HueCollector) groupedLightOwnerNames() map[string]string {
 	names := map[string]string{}
 
@@ -395,6 +399,9 @@ func (c *HueCollector) collectGroupedLights(ownerNames map[string]string) {
 		return
 	}
 	for _, g := range groups {
+		if isIgnoredGroupType(g.Owner.RType) {
+			continue
+		}
 		groupName := ownerNames[resourceKey(g.Owner.RType, g.Owner.RID)]
 		if groupName == "" {
 			continue
@@ -516,10 +523,17 @@ func (c *HueCollector) collectScenes(groupNames map[string]string) {
 		return
 	}
 	for _, s := range scenes {
+		if isIgnoredGroupType(s.Group.RType) {
+			continue
+		}
+		groupName := groupNames[resourceKey(s.Group.RType, s.Group.RID)]
+		if groupName == "" {
+			continue
+		}
 		labels := prometheus.Labels{
 			"id":         s.ID,
 			"name":       s.Metadata.Name,
-			"group_name": groupNames[resourceKey(s.Group.RType, s.Group.RID)],
+			"group_name": groupName,
 			"group_type": s.Group.RType,
 		}
 		active := s.Status.Active != "inactive" && s.Status.Active != ""
