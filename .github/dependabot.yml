@@ -1,0 +1,50 @@
+version: 2
+
+updates:
+  # Go module dependencies
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    # Group all non-major updates into a single PR to reduce noise.
+    groups:
+      go-minor-patch:
+        update-types:
+          - minor
+          - patch
+    # Major version bumps are left ungrouped so they get individual review.
+    commit-message:
+      prefix: "build(deps)"
+    labels:
+      - dependencies
+      - go
+
+  # GitHub Actions
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions-minor-patch:
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: "ci(deps)"
+    labels:
+      - dependencies
+      - github-actions
+
+  # Docker base images
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "build(deps)"
+    labels:
+      - dependencies
+      - docker

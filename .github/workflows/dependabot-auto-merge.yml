@@ -1,0 +1,44 @@
+name: Dependabot auto-merge
+
+# Automatically merge Dependabot PRs for patch and minor updates once all
+# required status checks pass.  Major version bumps are intentionally excluded
+# because they may contain breaking changes that need human review.
+#
+# Prerequisites (one-time repository setup):
+#   1. Enable "Allow auto-merge" in Settings → General → Pull Requests.
+#   2. Add a branch-protection rule for `main` that requires the
+#      "Build and push Docker image / Build multi-platform image" check to
+#      pass — auto-merge will only complete after that check goes green.
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    name: Auto-merge patch/minor Dependabot PRs
+    runs-on: ubuntu-latest
+    # Only run for Dependabot-authored PRs.
+    if: github.actor == 'dependabot[bot]'
+
+    steps:
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Approve and enable auto-merge for patch/minor updates
+        # Skip major updates — they require a human decision.
+        if: |
+          steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+          steps.metadata.outputs.update-type == 'version-update:semver-minor'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr review --approve "$PR_URL"
+          gh pr merge --auto --squash "$PR_URL"

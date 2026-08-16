@@ -1,0 +1,12 @@
+# Hue Exporter configuration
+# bridge_ip: IP address or hostname of the Hue bridge
+# app_key:   Application key (formerly called "username" in the Hue v1 API).
+#            Create one with: POST https://<bridge_ip>/api {"devicetype":"hue_exporter#server"}
+bridge_ip: 192.168.1.2
+app_key: "your-app-key-here"
+
+# TLS options — Hue bridges use self-signed certificates.
+# Option A: disable certificate verification (quick, less secure)
+tls_insecure_skip_verify: true
+# Option B: provide the bridge CA certificate (recommended)
+# tls_ca_cert_file: /path/to/bridge-ca.pem
