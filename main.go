@@ -89,10 +89,32 @@ func discoverBridgeIP(client *http.Client, discoveryURL string) (string, error) 
 	}
 }
 
+func runHealthcheck(target string) error {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(target)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("unexpected status code %d", resp.StatusCode)
+	}
+	return nil
+}
+
 func main() {
 	listenAddr := flag.String("web.listen-address", ":9366", "Address to listen on for web interface and telemetry.")
 	configFile := flag.String("config.file", "hue_exporter.yml", "Path to the exporter configuration file.")
+	healthcheckTarget := flag.String("healthcheck.target", "", "Probe URL and exit with status 0 when healthy, 1 when unhealthy.")
 	flag.Parse()
+
+	if *healthcheckTarget != "" {
+		if err := runHealthcheck(*healthcheckTarget); err != nil {
+			fmt.Fprintf(os.Stderr, "healthcheck failed: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
 	cfg, err := loadConfig(*configFile)
 	if err != nil {
@@ -134,6 +156,10 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, `<html>
 <head><title>Hue Exporter</title></head>
