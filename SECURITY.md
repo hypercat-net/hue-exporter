@@ -1,17 +1,18 @@
 # Security Policy
 
+Hypercat takes security seriously across all repositories.
+
 ## Supported Versions
 
 Only the latest released version is supported for security updates.
 
 ## Reporting a Vulnerability
 
-Please do **not** open public issues for security vulnerabilities.
+Please **do not** report vulnerabilities in public GitHub issues.
 
-Instead, use GitHub's private vulnerability reporting for this repository:
+Use one of the private channels below:
 
-1. Open the repository on GitHub.
-2. Go to **Security** → **Advisories**.
-3. Click **Report a vulnerability**.
+1. GitHub Security Advisories (**Security** → **Advisories** → **Report a vulnerability**)
+2. Email: **github@hypercat.net**
 
 Include reproduction details, impact, and any known mitigations.
