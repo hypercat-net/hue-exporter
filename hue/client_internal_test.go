@@ -1,6 +1,7 @@
 package hue
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -187,4 +188,73 @@ func TestCreateAppKeyMissingUsername(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "did not include a username") {
 		t.Fatalf("expected missing username error, got: %v", err)
 	}
+}
+
+func TestRequestErrorHelpers(t *testing.T) {
+	t.Run("Error handles nil receiver", func(t *testing.T) {
+		var err *RequestError
+		if got := err.Error(); got != "<nil>" {
+			t.Fatalf("unexpected nil error text: %q", got)
+		}
+	})
+
+	t.Run("Error includes status and path", func(t *testing.T) {
+		err := &RequestError{Path: "/light", StatusCode: http.StatusBadGateway, Err: errors.New("bridge down")}
+		if got := err.Error(); !strings.Contains(got, "unexpected status 502") {
+			t.Fatalf("unexpected error text: %q", got)
+		}
+	})
+
+	t.Run("Unwrap returns wrapped error", func(t *testing.T) {
+		cause := errors.New("network problem")
+		err := &RequestError{Path: "/light", Err: cause}
+		if !errors.Is(err, cause) {
+			t.Fatal("expected errors.Is to match wrapped cause")
+		}
+	})
+}
+
+func TestIsConnectionError(t *testing.T) {
+	if !IsConnectionError(&RequestError{Path: "/light", Err: errors.New("dial tcp"), StatusCode: 0}) {
+		t.Fatal("expected connection error to be detected")
+	}
+	if IsConnectionError(&RequestError{Path: "/light", Err: errors.New("bad request"), StatusCode: http.StatusBadRequest}) {
+		t.Fatal("did not expect status-based error to be treated as connection error")
+	}
+}
+
+func TestCreateAppKeyAdditionalErrors(t *testing.T) {
+	t.Run("empty API response", func(t *testing.T) {
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`[]`))
+		}))
+		defer server.Close()
+
+		u, err := url.Parse(server.URL)
+		if err != nil {
+			t.Fatalf("parse server URL: %v", err)
+		}
+
+		_, err = CreateAppKey(u.Host, "hue_exporter#server", ClientOptions{InsecureSkipVerify: true})
+		if err == nil || !strings.Contains(err.Error(), "response was empty") {
+			t.Fatalf("expected empty response error, got: %v", err)
+		}
+	})
+
+	t.Run("invalid JSON response", func(t *testing.T) {
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`not-json`))
+		}))
+		defer server.Close()
+
+		u, err := url.Parse(server.URL)
+		if err != nil {
+			t.Fatalf("parse server URL: %v", err)
+		}
+
+		_, err = CreateAppKey(u.Host, "hue_exporter#server", ClientOptions{InsecureSkipVerify: true})
+		if err == nil || !strings.Contains(err.Error(), "decoding app key response") {
+			t.Fatalf("expected decode error, got: %v", err)
+		}
+	})
 }
