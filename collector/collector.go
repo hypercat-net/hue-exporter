@@ -62,10 +62,10 @@ type HueCollector struct {
 
 // New creates a new HueCollector.
 func New(bridge hue.Bridge) *HueCollector {
-	lightLabels := []string{"id", "name", "archetype"}
-	groupLabels := []string{"id", "group_type", "group_name"}
-	deviceLabels := []string{"id", "device_name"}
-	sceneLabels := []string{"id", "name", "group_name", "group_type"}
+	lightLabels := []string{"name"}
+	groupLabels := []string{"group_type", "name"}
+	deviceLabels := []string{"name"}
+	sceneLabels := []string{"name", "group_name", "group_type"}
 
 	return &HueCollector{
 		bridge:           bridge,
@@ -412,9 +412,7 @@ func (c *HueCollector) collectLights() {
 	}
 	for _, l := range lights {
 		labels := prometheus.Labels{
-			"id":        l.ID,
-			"name":      l.Metadata.Name,
-			"archetype": l.Metadata.Archetype,
+			"name": l.Metadata.Name,
 		}
 		c.lightOn.With(labels).Set(boolToFloat(l.On.On))
 		if l.Dimming != nil {
@@ -445,9 +443,8 @@ func (c *HueCollector) collectGroupedLights() {
 			continue
 		}
 		labels := prometheus.Labels{
-			"id":         g.ID,
 			"group_type": g.Owner.RType,
-			"group_name": groupName,
+			"name":       groupName,
 		}
 		c.groupedLightOn.With(labels).Set(boolToFloat(g.On.On))
 		if g.Dimming != nil {
@@ -468,8 +465,7 @@ func (c *HueCollector) collectMotion() {
 			continue
 		}
 		labels := prometheus.Labels{
-			"id":          s.ID,
-			"device_name": deviceName,
+			"name": deviceName,
 		}
 		motion := s.Motion.Motion
 		if s.Motion.MotionReport != nil {
@@ -495,8 +491,7 @@ func (c *HueCollector) collectTemperature() {
 			continue
 		}
 		labels := prometheus.Labels{
-			"id":          s.ID,
-			"device_name": deviceName,
+			"name": deviceName,
 		}
 		temp := s.Temperature.Temperature
 		if s.Temperature.TemperatureReport != nil {
@@ -521,8 +516,7 @@ func (c *HueCollector) collectLightLevel() {
 			continue
 		}
 		labels := prometheus.Labels{
-			"id":          s.ID,
-			"device_name": deviceName,
+			"name": deviceName,
 		}
 		level := s.Light.LightLevel
 		if s.Light.LightLevelReport != nil {
@@ -547,8 +541,7 @@ func (c *HueCollector) collectDevicePower() {
 			continue
 		}
 		labels := prometheus.Labels{
-			"id":          d.ID,
-			"device_name": deviceName,
+			"name": deviceName,
 		}
 		c.deviceBatteryLevel.With(labels).Set(float64(*d.PowerState.BatteryLevel))
 	}
@@ -566,8 +559,7 @@ func (c *HueCollector) collectZigbee() {
 			continue
 		}
 		labels := prometheus.Labels{
-			"id":          d.ID,
-			"device_name": deviceName,
+			"name": deviceName,
 		}
 		connected := d.Status == "connected"
 		c.zigbeeConnected.With(labels).Set(boolToFloat(connected))
@@ -589,7 +581,6 @@ func (c *HueCollector) collectScenes() {
 			continue
 		}
 		labels := prometheus.Labels{
-			"id":         s.ID,
 			"name":       s.Metadata.Name,
 			"group_name": groupName,
 			"group_type": s.Group.RType,
