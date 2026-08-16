@@ -66,7 +66,7 @@ func discoverBridgeIP(client *http.Client, discoveryURL string) (string, error) 
 		return "", fmt.Errorf("reading Hue discovery response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("Hue discovery returned status %d: %s", resp.StatusCode, body)
+		return "", fmt.Errorf("Hue discovery returned status %d: %.200q", resp.StatusCode, body)
 	}
 
 	var bridges []discoveredBridge
