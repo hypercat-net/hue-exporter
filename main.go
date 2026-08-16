@@ -60,7 +60,7 @@ func discoverBridgeIP(client *http.Client, discoveryURL string) (string, error) 
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if err != nil {
 		return "", fmt.Errorf("reading Hue discovery response: %w", err)
 	}
@@ -104,7 +104,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Discovered Hue bridge at %s\n", bridgeIP)
+		fmt.Fprintf(os.Stderr, "Discovered Hue bridge at %s\n", bridgeIP)
 	}
 
 	opts := hue.ClientOptions{
