@@ -58,10 +58,9 @@ type HueCollector struct {
 // New creates a new HueCollector.
 func New(bridge hue.Bridge) *HueCollector {
 	lightLabels := []string{"id", "name", "archetype"}
-	groupLabels := []string{"id", "group_id", "group_type", "group_name"}
-	deviceLabels := []string{"id", "device_id"}
-	deviceNameLabels := []string{"id", "device_id", "device_name"}
-	sceneLabels := []string{"id", "name", "group_id", "group_name", "group_type"}
+	groupLabels := []string{"id", "group_type", "group_name"}
+	deviceLabels := []string{"id", "device_name"}
+	sceneLabels := []string{"id", "name", "group_name", "group_type"}
 
 	return &HueCollector{
 		bridge: bridge,
@@ -172,7 +171,7 @@ func New(bridge hue.Bridge) *HueCollector {
 			Subsystem: "device",
 			Name:      "battery_level_percent",
 			Help:      "Battery level of the device as a percentage (0–100).",
-		}, deviceNameLabels),
+		}, deviceLabels),
 		deviceScrapesTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "device",
@@ -270,14 +269,17 @@ func (c *HueCollector) Collect(ch chan<- prometheus.Metric) {
 
 	c.sceneActive.Reset()
 
+	groupNames := c.groupedLightOwnerNames()
+	deviceNames := c.deviceOwnerNames()
+
 	c.collectLights()
-	c.collectGroupedLights()
-	c.collectMotion()
-	c.collectTemperature()
-	c.collectLightLevel()
-	c.collectDevicePower()
-	c.collectZigbee()
-	c.collectScenes()
+	c.collectGroupedLights(groupNames)
+	c.collectMotion(deviceNames)
+	c.collectTemperature(deviceNames)
+	c.collectLightLevel(deviceNames)
+	c.collectDevicePower(deviceNames)
+	c.collectZigbee(deviceNames)
+	c.collectScenes(groupNames)
 
 	// Collect all metrics.
 	c.lightOn.Collect(ch)
@@ -386,19 +388,21 @@ func (c *HueCollector) collectLights() {
 	}
 }
 
-func (c *HueCollector) collectGroupedLights() {
+func (c *HueCollector) collectGroupedLights(ownerNames map[string]string) {
 	groups, err := c.bridge.GetGroupedLights()
 	if err != nil {
 		c.groupedLightScrapesTotal.Add(1)
 		return
 	}
-	ownerNames := c.groupedLightOwnerNames()
 	for _, g := range groups {
+		groupName := ownerNames[resourceKey(g.Owner.RType, g.Owner.RID)]
+		if groupName == "" {
+			continue
+		}
 		labels := prometheus.Labels{
 			"id":         g.ID,
-			"group_id":   g.Owner.RID,
 			"group_type": g.Owner.RType,
-			"group_name": ownerNames[resourceKey(g.Owner.RType, g.Owner.RID)],
+			"group_name": groupName,
 		}
 		c.groupedLightOn.With(labels).Set(boolToFloat(g.On.On))
 		if g.Dimming != nil {
@@ -407,7 +411,7 @@ func (c *HueCollector) collectGroupedLights() {
 	}
 }
 
-func (c *HueCollector) collectMotion() {
+func (c *HueCollector) collectMotion(ownerNames map[string]string) {
 	sensors, err := c.bridge.GetMotion()
 	if err != nil {
 		c.motionScrapesTotal.Add(1)
@@ -415,8 +419,8 @@ func (c *HueCollector) collectMotion() {
 	}
 	for _, s := range sensors {
 		labels := prometheus.Labels{
-			"id":        s.ID,
-			"device_id": s.Owner.RID,
+			"id":          s.ID,
+			"device_name": ownerNames[resourceKey(s.Owner.RType, s.Owner.RID)],
 		}
 		motion := s.Motion.Motion
 		if s.Motion.MotionReport != nil {
@@ -427,7 +431,7 @@ func (c *HueCollector) collectMotion() {
 	}
 }
 
-func (c *HueCollector) collectTemperature() {
+func (c *HueCollector) collectTemperature(ownerNames map[string]string) {
 	sensors, err := c.bridge.GetTemperature()
 	if err != nil {
 		c.temperatureScrapesTotal.Add(1)
@@ -438,8 +442,8 @@ func (c *HueCollector) collectTemperature() {
 			continue
 		}
 		labels := prometheus.Labels{
-			"id":        s.ID,
-			"device_id": s.Owner.RID,
+			"id":          s.ID,
+			"device_name": ownerNames[resourceKey(s.Owner.RType, s.Owner.RID)],
 		}
 		temp := s.Temperature.Temperature
 		if s.Temperature.TemperatureReport != nil {
@@ -449,7 +453,7 @@ func (c *HueCollector) collectTemperature() {
 	}
 }
 
-func (c *HueCollector) collectLightLevel() {
+func (c *HueCollector) collectLightLevel(ownerNames map[string]string) {
 	sensors, err := c.bridge.GetLightLevel()
 	if err != nil {
 		c.lightLevelScrapesTotal.Add(1)
@@ -460,8 +464,8 @@ func (c *HueCollector) collectLightLevel() {
 			continue
 		}
 		labels := prometheus.Labels{
-			"id":        s.ID,
-			"device_id": s.Owner.RID,
+			"id":          s.ID,
+			"device_name": ownerNames[resourceKey(s.Owner.RType, s.Owner.RID)],
 		}
 		level := s.Light.LightLevel
 		if s.Light.LightLevelReport != nil {
@@ -471,27 +475,25 @@ func (c *HueCollector) collectLightLevel() {
 	}
 }
 
-func (c *HueCollector) collectDevicePower() {
+func (c *HueCollector) collectDevicePower(ownerNames map[string]string) {
 	devices, err := c.bridge.GetDevicePower()
 	if err != nil {
 		c.deviceScrapesTotal.Add(1)
 		return
 	}
-	ownerNames := c.deviceOwnerNames()
 	for _, d := range devices {
 		if d.PowerState.BatteryLevel == nil {
 			continue
 		}
 		labels := prometheus.Labels{
 			"id":          d.ID,
-			"device_id":   d.Owner.RID,
 			"device_name": ownerNames[resourceKey(d.Owner.RType, d.Owner.RID)],
 		}
 		c.deviceBatteryLevel.With(labels).Set(float64(*d.PowerState.BatteryLevel))
 	}
 }
 
-func (c *HueCollector) collectZigbee() {
+func (c *HueCollector) collectZigbee(ownerNames map[string]string) {
 	devices, err := c.bridge.GetZigbeeConnectivity()
 	if err != nil {
 		c.zigbeeScrapesTotal.Add(1)
@@ -499,26 +501,24 @@ func (c *HueCollector) collectZigbee() {
 	}
 	for _, d := range devices {
 		labels := prometheus.Labels{
-			"id":        d.ID,
-			"device_id": d.Owner.RID,
+			"id":          d.ID,
+			"device_name": ownerNames[resourceKey(d.Owner.RType, d.Owner.RID)],
 		}
 		connected := d.Status == "connected"
 		c.zigbeeConnected.With(labels).Set(boolToFloat(connected))
 	}
 }
 
-func (c *HueCollector) collectScenes() {
+func (c *HueCollector) collectScenes(groupNames map[string]string) {
 	scenes, err := c.bridge.GetScenes()
 	if err != nil {
 		c.sceneScrapesTotal.Add(1)
 		return
 	}
-	groupNames := c.groupedLightOwnerNames()
 	for _, s := range scenes {
 		labels := prometheus.Labels{
 			"id":         s.ID,
 			"name":       s.Metadata.Name,
-			"group_id":   s.Group.RID,
 			"group_name": groupNames[resourceKey(s.Group.RType, s.Group.RID)],
 			"group_type": s.Group.RType,
 		}

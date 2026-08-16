@@ -200,8 +200,32 @@ func TestGroupedLight(t *testing.T) {
 	expected := `
 # HELP hue_grouped_light_on Whether any light in the group is on (1) or all are off (0).
 # TYPE hue_grouped_light_on gauge
-hue_grouped_light_on{group_id="room-1",group_name="Living Room",group_type="room",id="group-1"} 1
+hue_grouped_light_on{group_name="Living Room",group_type="room",id="group-1"} 1
 `
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_grouped_light_on"); err != nil {
+		t.Errorf("unexpected metrics: %v", err)
+	}
+}
+
+func TestGroupedLightUnnamedOwnerSkipped(t *testing.T) {
+	bridge := &mockBridge{
+		groupedLights: []hue.GroupedLight{
+			{
+				ID:    "group-2",
+				On:    hue.OnState{On: true},
+				Owner: hue.ResourceRef{RID: "bridge-home-1", RType: "bridge_home"},
+			},
+			{
+				ID:    "group-3",
+				On:    hue.OnState{On: true},
+				Owner: hue.ResourceRef{RID: "private-group-1", RType: "private_group"},
+			},
+		},
+	}
+
+	reg := newTestRegistry(bridge)
+
+	expected := ``
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_grouped_light_on"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
 	}
@@ -217,6 +241,9 @@ func TestMotionDetected(t *testing.T) {
 				Owner:   hue.ResourceRef{RID: "device-1", RType: "device"},
 			},
 		},
+		devices: []hue.Device{
+			{ID: "device-1", Metadata: hue.Metadata{Name: "Hall Sensor"}},
+		},
 	}
 
 	reg := newTestRegistry(bridge)
@@ -224,7 +251,7 @@ func TestMotionDetected(t *testing.T) {
 	expected := `
 # HELP hue_motion_detected Whether motion is currently detected (1) or not (0).
 # TYPE hue_motion_detected gauge
-hue_motion_detected{device_id="device-1",id="motion-1"} 1
+hue_motion_detected{device_name="Hall Sensor",id="motion-1"} 1
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_motion_detected"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
@@ -247,6 +274,9 @@ func TestMotionReport(t *testing.T) {
 				Owner: hue.ResourceRef{RID: "device-2", RType: "device"},
 			},
 		},
+		devices: []hue.Device{
+			{ID: "device-2", Metadata: hue.Metadata{Name: "Kitchen Sensor"}},
+		},
 	}
 
 	reg := newTestRegistry(bridge)
@@ -254,7 +284,7 @@ func TestMotionReport(t *testing.T) {
 	expected := `
 # HELP hue_motion_detected Whether motion is currently detected (1) or not (0).
 # TYPE hue_motion_detected gauge
-hue_motion_detected{device_id="device-2",id="motion-2"} 1
+hue_motion_detected{device_name="Kitchen Sensor",id="motion-2"} 1
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_motion_detected"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
@@ -274,6 +304,9 @@ func TestTemperature(t *testing.T) {
 				Owner: hue.ResourceRef{RID: "device-3", RType: "device"},
 			},
 		},
+		devices: []hue.Device{
+			{ID: "device-3", Metadata: hue.Metadata{Name: "Office Sensor"}},
+		},
 	}
 
 	reg := newTestRegistry(bridge)
@@ -281,7 +314,7 @@ func TestTemperature(t *testing.T) {
 	expected := `
 # HELP hue_temperature_celsius Current temperature reading in degrees Celsius.
 # TYPE hue_temperature_celsius gauge
-hue_temperature_celsius{device_id="device-3",id="temp-1"} 21.5
+hue_temperature_celsius{device_name="Office Sensor",id="temp-1"} 21.5
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_temperature_celsius"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
@@ -326,6 +359,9 @@ func TestLightLevel(t *testing.T) {
 				Owner: hue.ResourceRef{RID: "device-5", RType: "device"},
 			},
 		},
+		devices: []hue.Device{
+			{ID: "device-5", Metadata: hue.Metadata{Name: "Window Sensor"}},
+		},
 	}
 
 	reg := newTestRegistry(bridge)
@@ -333,7 +369,7 @@ func TestLightLevel(t *testing.T) {
 	expected := `
 # HELP hue_light_level_lux Current ambient light level in lux.
 # TYPE hue_light_level_lux gauge
-hue_light_level_lux{device_id="device-5",id="ll-1"} 100
+hue_light_level_lux{device_name="Window Sensor",id="ll-1"} 100
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_light_level_lux"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
@@ -366,7 +402,7 @@ func TestDeviceBattery(t *testing.T) {
 	expected := `
 # HELP hue_device_battery_level_percent Battery level of the device as a percentage (0–100).
 # TYPE hue_device_battery_level_percent gauge
-hue_device_battery_level_percent{device_id="device-6",device_name="Hall Sensor",id="dp-1"} 85
+hue_device_battery_level_percent{device_name="Hall Sensor",id="dp-1"} 85
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_device_battery_level_percent"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
@@ -409,6 +445,10 @@ func TestZigbeeConnected(t *testing.T) {
 				Owner:  hue.ResourceRef{RID: "device-9", RType: "device"},
 			},
 		},
+		devices: []hue.Device{
+			{ID: "device-8", Metadata: hue.Metadata{Name: "Desk Lamp"}},
+			{ID: "device-9", Metadata: hue.Metadata{Name: "Wall Switch"}},
+		},
 	}
 
 	reg := newTestRegistry(bridge)
@@ -416,8 +456,8 @@ func TestZigbeeConnected(t *testing.T) {
 	expected := `
 # HELP hue_zigbee_connected Whether the Zigbee device is connected (1) or not (0).
 # TYPE hue_zigbee_connected gauge
-hue_zigbee_connected{device_id="device-8",id="zb-1"} 1
-hue_zigbee_connected{device_id="device-9",id="zb-2"} 0
+hue_zigbee_connected{device_name="Desk Lamp",id="zb-1"} 1
+hue_zigbee_connected{device_name="Wall Switch",id="zb-2"} 0
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_zigbee_connected"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
@@ -450,8 +490,8 @@ func TestSceneActive(t *testing.T) {
 	expected := `
 # HELP hue_scene_active Whether the scene is currently active (1) or not (0).
 # TYPE hue_scene_active gauge
-hue_scene_active{group_id="room-1",group_name="Living Room",group_type="room",id="scene-1",name="Relax"} 1
-hue_scene_active{group_id="room-1",group_name="Living Room",group_type="room",id="scene-2",name="Concentrate"} 0
+hue_scene_active{group_name="Living Room",group_type="room",id="scene-1",name="Relax"} 1
+hue_scene_active{group_name="Living Room",group_type="room",id="scene-2",name="Concentrate"} 0
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_scene_active"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)
