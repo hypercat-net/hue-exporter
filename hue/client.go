@@ -1,0 +1,367 @@
+// Package hue provides a client for the Philips Hue CLIP v2 REST API.
+package hue
+
+import (
+	"crypto/tls"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
+)
+
+const defaultTimeout = 10 * time.Second
+
+// apiResponse is the standard envelope returned by every CLIP v2 endpoint.
+type apiResponse[T any] struct {
+	Data   []T        `json:"data"`
+	Errors []apiError `json:"errors"`
+}
+
+type apiError struct {
+	Description string `json:"description"`
+}
+
+// Client talks to a Hue bridge using the CLIP v2 API.
+type Client struct {
+	baseURL    string
+	appKey     string
+	httpClient *http.Client
+}
+
+// NewClient creates a new Hue v2 API client.
+//
+// bridgeIP is the IP address or hostname of the bridge.
+// appKey is the Hue application key (formerly called "username" in v1).
+// The client skips TLS certificate verification because Hue bridges use
+// self-signed certificates.
+func NewClient(bridgeIP, appKey string) *Client {
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // Bridge uses self-signed cert
+	}
+	return &Client{
+		baseURL: fmt.Sprintf("https://%s/clip/v2/resource", bridgeIP),
+		appKey:  appKey,
+		httpClient: &http.Client{
+			Timeout:   defaultTimeout,
+			Transport: transport,
+		},
+	}
+}
+
+// get fetches a CLIP v2 resource endpoint and decodes the response.
+func get[T any](c *Client, path string) ([]T, error) {
+	req, err := http.NewRequest(http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request for %s: %w", path, err)
+	}
+	req.Header.Set("hue-application-key", c.appKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetching %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading body from %s: %w", path, err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status %d from %s: %s", resp.StatusCode, path, body)
+	}
+
+	var envelope apiResponse[T]
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, fmt.Errorf("decoding response from %s: %w", path, err)
+	}
+	if len(envelope.Errors) > 0 {
+		return nil, fmt.Errorf("API error from %s: %s", path, envelope.Errors[0].Description)
+	}
+	return envelope.Data, nil
+}
+
+// ---- Resource types --------------------------------------------------------
+
+// ResourceRef is a reference to another resource (rid + rtype).
+type ResourceRef struct {
+	RID   string `json:"rid"`
+	RType string `json:"rtype"`
+}
+
+// Metadata holds the human-readable name and archetype of a resource.
+type Metadata struct {
+	Name      string `json:"name"`
+	Archetype string `json:"archetype"`
+}
+
+// OnState represents an on/off state.
+type OnState struct {
+	On bool `json:"on"`
+}
+
+// Dimming represents a brightness value (0–100%).
+type Dimming struct {
+	Brightness float64 `json:"brightness"`
+}
+
+// ColorTemperature holds the mirek value and a validity flag.
+type ColorTemperature struct {
+	Mirek      *int `json:"mirek"`
+	MirekValid bool `json:"mirek_valid"`
+}
+
+// XY is a CIE 1931 xy chromaticity coordinate.
+type XY struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+}
+
+// Color holds the CIE xy color of a light.
+type Color struct {
+	XY XY `json:"xy"`
+}
+
+// Light is a CLIP v2 light resource.
+type Light struct {
+	ID               string            `json:"id"`
+	Metadata         Metadata          `json:"metadata"`
+	On               OnState           `json:"on"`
+	Dimming          *Dimming          `json:"dimming"`
+	ColorTemperature *ColorTemperature `json:"color_temperature"`
+	Color            *Color            `json:"color"`
+	Owner            ResourceRef       `json:"owner"`
+}
+
+// GroupedLight is a CLIP v2 grouped_light resource (aggregate state of a room/zone).
+type GroupedLight struct {
+	ID      string      `json:"id"`
+	On      OnState     `json:"on"`
+	Dimming *Dimming    `json:"dimming"`
+	Owner   ResourceRef `json:"owner"`
+}
+
+// Room is a CLIP v2 room resource.
+type Room struct {
+	ID       string        `json:"id"`
+	Metadata Metadata      `json:"metadata"`
+	Services []ResourceRef `json:"services"`
+}
+
+// Zone is a CLIP v2 zone resource.
+type Zone struct {
+	ID       string        `json:"id"`
+	Metadata Metadata      `json:"metadata"`
+	Services []ResourceRef `json:"services"`
+}
+
+// MotionReport contains the timestamped motion detection state.
+type MotionReport struct {
+	Changed string `json:"changed"`
+	Motion  bool   `json:"motion"`
+}
+
+// MotionSensor contains the motion state.
+type MotionSensor struct {
+	Motion       bool          `json:"motion"`
+	MotionReport *MotionReport `json:"motion_report"`
+}
+
+// Motion is a CLIP v2 motion resource.
+type Motion struct {
+	ID      string       `json:"id"`
+	Enabled bool         `json:"enabled"`
+	Motion  MotionSensor `json:"motion"`
+	Owner   ResourceRef  `json:"owner"`
+}
+
+// TemperatureReport contains the timestamped temperature reading.
+type TemperatureReport struct {
+	Changed     string  `json:"changed"`
+	Temperature float64 `json:"temperature"`
+}
+
+// TemperatureSensor contains the temperature state.
+type TemperatureSensor struct {
+	Temperature       float64            `json:"temperature"`
+	TemperatureValid  bool               `json:"temperature_valid"`
+	TemperatureReport *TemperatureReport `json:"temperature_report"`
+}
+
+// Temperature is a CLIP v2 temperature resource.
+type Temperature struct {
+	ID          string            `json:"id"`
+	Enabled     bool              `json:"enabled"`
+	Temperature TemperatureSensor `json:"temperature"`
+	Owner       ResourceRef       `json:"owner"`
+}
+
+// LightLevelReport contains the timestamped light level reading.
+type LightLevelReport struct {
+	Changed    string `json:"changed"`
+	LightLevel int    `json:"light_level"`
+}
+
+// LightLevelSensor contains the light level state.
+type LightLevelSensor struct {
+	LightLevel       int               `json:"light_level"`
+	LightLevelValid  bool              `json:"light_level_valid"`
+	LightLevelReport *LightLevelReport `json:"light_level_report"`
+}
+
+// LightLevel is a CLIP v2 light_level resource.
+type LightLevel struct {
+	ID      string           `json:"id"`
+	Enabled bool             `json:"enabled"`
+	Light   LightLevelSensor `json:"light"`
+	Owner   ResourceRef      `json:"owner"`
+}
+
+// PowerState holds battery information.
+type PowerState struct {
+	BatteryState string `json:"battery_state"`
+	BatteryLevel *int   `json:"battery_level"`
+}
+
+// DevicePower is a CLIP v2 device_power resource.
+type DevicePower struct {
+	ID         string      `json:"id"`
+	PowerState PowerState  `json:"power_state"`
+	Owner      ResourceRef `json:"owner"`
+}
+
+// ZigbeeConnectivity is a CLIP v2 zigbee_connectivity resource.
+type ZigbeeConnectivity struct {
+	ID         string      `json:"id"`
+	Status     string      `json:"status"`
+	MACAddress string      `json:"mac_address"`
+	Owner      ResourceRef `json:"owner"`
+}
+
+// Device is a CLIP v2 device resource.
+type Device struct {
+	ID          string        `json:"id"`
+	Metadata    Metadata      `json:"metadata"`
+	ProductData ProductData   `json:"product_data"`
+	Services    []ResourceRef `json:"services"`
+}
+
+// ProductData holds product metadata for a device.
+type ProductData struct {
+	ModelID          string `json:"model_id"`
+	ManufacturerName string `json:"manufacturer_name"`
+	ProductName      string `json:"product_name"`
+	SoftwareVersion  string `json:"software_version"`
+}
+
+// Scene is a CLIP v2 scene resource.
+type Scene struct {
+	ID       string      `json:"id"`
+	Metadata Metadata    `json:"metadata"`
+	Group    ResourceRef `json:"group"`
+	Status   SceneStatus `json:"status"`
+}
+
+// SceneStatus holds the active state of a scene.
+type SceneStatus struct {
+	Active string `json:"active"`
+}
+
+// ButtonReport contains the timestamped last button event.
+type ButtonReport struct {
+	Updated string `json:"updated"`
+	Event   string `json:"event"`
+}
+
+// ButtonState holds the last button event.
+type ButtonState struct {
+	LastEvent    string        `json:"last_event"`
+	ButtonReport *ButtonReport `json:"button_report"`
+}
+
+// Button is a CLIP v2 button resource.
+type Button struct {
+	ID     string      `json:"id"`
+	Button ButtonState `json:"button"`
+	Owner  ResourceRef `json:"owner"`
+}
+
+// ---- Bridge interface (enables testing with a mock) ------------------------
+
+// Bridge is the interface used by collectors to fetch Hue resources.
+// It can be satisfied by *Client for production use or a mock for testing.
+type Bridge interface {
+	GetLights() ([]Light, error)
+	GetGroupedLights() ([]GroupedLight, error)
+	GetRooms() ([]Room, error)
+	GetZones() ([]Zone, error)
+	GetMotion() ([]Motion, error)
+	GetTemperature() ([]Temperature, error)
+	GetLightLevel() ([]LightLevel, error)
+	GetDevicePower() ([]DevicePower, error)
+	GetZigbeeConnectivity() ([]ZigbeeConnectivity, error)
+	GetDevices() ([]Device, error)
+	GetScenes() ([]Scene, error)
+	GetButtons() ([]Button, error)
+}
+
+// GetLights returns all lights from the bridge.
+func (c *Client) GetLights() ([]Light, error) {
+	return get[Light](c, "/light")
+}
+
+// GetGroupedLights returns all grouped lights from the bridge.
+func (c *Client) GetGroupedLights() ([]GroupedLight, error) {
+	return get[GroupedLight](c, "/grouped_light")
+}
+
+// GetRooms returns all rooms from the bridge.
+func (c *Client) GetRooms() ([]Room, error) {
+	return get[Room](c, "/room")
+}
+
+// GetZones returns all zones from the bridge.
+func (c *Client) GetZones() ([]Zone, error) {
+	return get[Zone](c, "/zone")
+}
+
+// GetMotion returns all motion sensors from the bridge.
+func (c *Client) GetMotion() ([]Motion, error) {
+	return get[Motion](c, "/motion")
+}
+
+// GetTemperature returns all temperature sensors from the bridge.
+func (c *Client) GetTemperature() ([]Temperature, error) {
+	return get[Temperature](c, "/temperature")
+}
+
+// GetLightLevel returns all light-level sensors from the bridge.
+func (c *Client) GetLightLevel() ([]LightLevel, error) {
+	return get[LightLevel](c, "/light_level")
+}
+
+// GetDevicePower returns all device-power resources from the bridge.
+func (c *Client) GetDevicePower() ([]DevicePower, error) {
+	return get[DevicePower](c, "/device_power")
+}
+
+// GetZigbeeConnectivity returns all Zigbee connectivity resources from the bridge.
+func (c *Client) GetZigbeeConnectivity() ([]ZigbeeConnectivity, error) {
+	return get[ZigbeeConnectivity](c, "/zigbee_connectivity")
+}
+
+// GetDevices returns all devices from the bridge.
+func (c *Client) GetDevices() ([]Device, error) {
+	return get[Device](c, "/device")
+}
+
+// GetScenes returns all scenes from the bridge.
+func (c *Client) GetScenes() ([]Scene, error) {
+	return get[Scene](c, "/scene")
+}
+
+// GetButtons returns all button resources from the bridge.
+func (c *Client) GetButtons() ([]Button, error) {
+	return get[Button](c, "/button")
+}
