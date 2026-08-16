@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -57,6 +58,7 @@ type homePageData struct {
 	BridgeError   string
 	AppKeySet     bool
 	TLSCACertFile string
+	SetupUIEnabled bool
 	Message       string
 	ErrorMessage  string
 }
@@ -96,12 +98,16 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!DOCTYPE html>
   <li>API key set: {{if .AppKeySet}}yes{{else}}no{{end}}</li>
   <li>Bridge certificate file: {{if .TLSCACertFile}}{{.TLSCACertFile}}{{else}}not configured{{end}}</li>
 </ul>
+{{if .SetupUIEnabled}}
 <form method="post" action="/api/key">
   <button type="submit">Generate and save API key</button>
 </form>
 <form method="post" action="/api/cert">
   <button type="submit">Save bridge certificate and update config</button>
 </form>
+{{else}}
+<p>Setup UI is disabled.</p>
+{{end}}
 <p>Press the link button on the Hue Bridge before generating a key.</p>
 <p><a href="/metrics">Metrics</a></p>
 <p><a href="/healthz">Health</a></p>
@@ -404,35 +410,6 @@ func (s *setupServer) rediscoverBridge() (bridgeStatus, error) {
 		return s.bridge, nil
 	}
 
-	func (s *setupServer) handleSaveBridgeCertificate(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		bridge, err := s.ensureBridgeStatus()
-		if err != nil {
-			s.renderHome(w, "", fmt.Sprintf("failed to prepare bridge status: %v", err))
-			return
-		}
-		if bridge.Address == "" {
-			s.renderHome(w, "", "bridge host/IP is unavailable")
-			return
-		}
-
-		certPEM, err := s.fetchBridgeCert(bridge.Address)
-		if err != nil {
-			s.renderHome(w, "", fmt.Sprintf("failed to fetch bridge certificate: %v", err))
-			return
-		}
-		if err := s.persistBridgeCertificate(certPEM); err != nil {
-			s.renderHome(w, "", fmt.Sprintf("failed to persist bridge certificate: %v", err))
-			return
-		}
-
-		s.renderHome(w, "Bridge certificate saved and config updated.", "")
-	}
-
 	resolved := resolveBridgeStatus(s.discoveryClient, "", s.discoveryURL)
 	if resolved.Address == "" {
 		if s.bridge.Address != "" {
@@ -448,6 +425,35 @@ func (s *setupServer) rediscoverBridge() (bridgeStatus, error) {
 		return s.bridge, err
 	}
 	return s.bridge, nil
+}
+
+func (s *setupServer) handleSaveBridgeCertificate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	bridge, err := s.ensureBridgeStatus()
+	if err != nil {
+		s.renderHome(w, "", fmt.Sprintf("failed to prepare bridge status: %v", err))
+		return
+	}
+	if bridge.Address == "" {
+		s.renderHome(w, "", "bridge host/IP is unavailable")
+		return
+	}
+
+	certPEM, err := s.fetchBridgeCert(bridge.Address)
+	if err != nil {
+		s.renderHome(w, "", fmt.Sprintf("failed to fetch bridge certificate: %v", err))
+		return
+	}
+	if err := s.persistBridgeCertificate(certPEM); err != nil {
+		s.renderHome(w, "", fmt.Sprintf("failed to persist bridge certificate: %v", err))
+		return
+	}
+
+	s.renderHome(w, "Bridge certificate saved and config updated.", "")
 }
 
 func (s *setupServer) bridgeClient() (*hue.Client, bridgeStatus, error) {
@@ -580,6 +586,7 @@ func (s *setupServer) pageData(message, errorMessage string) homePageData {
 		BridgeError:   s.bridge.Error,
 		AppKeySet:     s.appKey != "",
 		TLSCACertFile: s.config.TLSCACertFile,
+		SetupUIEnabled: true,
 		Message:       message,
 		ErrorMessage:  errorMessage,
 	}
@@ -659,23 +666,41 @@ func (s *setupServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	handler.ServeHTTP(w, r)
 }
 
-func newMux(server *setupServer) *http.ServeMux {
+func newMux(server *setupServer, setupUIEnabled bool) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", http.HandlerFunc(server.handleMetrics))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("/api/key", server.handleGenerateAppKey)
-	mux.HandleFunc("/api/cert", server.handleSaveBridgeCertificate)
-	mux.HandleFunc("/", server.handleHome)
+	if setupUIEnabled {
+		mux.HandleFunc("/api/key", server.handleGenerateAppKey)
+		mux.HandleFunc("/api/cert", server.handleSaveBridgeCertificate)
+		mux.HandleFunc("/", server.handleHome)
+	}
 	return mux
+}
+
+func setupUIEnabled(flagValue bool) (bool, error) {
+	envValue := os.Getenv("HUE_EXPORTER_ENABLE_SETUP_UI")
+	if envValue == "" {
+		return flagValue, nil
+	}
+	enabled, err := strconv.ParseBool(envValue)
+	if err != nil {
+		return false, fmt.Errorf("invalid HUE_EXPORTER_ENABLE_SETUP_UI value %q: %w", envValue, err)
+	}
+	if enabled {
+		return true, nil
+	}
+	return flagValue, nil
 }
 
 func main() {
 	listenAddr := flag.String("web.listen-address", ":9366", "Address to listen on for web interface and telemetry.")
 	configFile := flag.String("config.file", "hue_exporter.yml", "Path to the exporter configuration file.")
 	healthcheckTarget := flag.String("healthcheck.target", "", "Probe URL and exit with status 0 when healthy, 1 when unhealthy.")
+	enableSetupUI := flag.Bool("web.enable-setup-ui", false, "Enable setup API UI (/, /api/key, /api/cert). Disabled by default.")
 	flag.Parse()
 
 	if *healthcheckTarget != "" {
@@ -703,9 +728,14 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+	uiEnabled, err := setupUIEnabled(*enableSetupUI)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
 
 	fmt.Printf("Listening on %s\n", *listenAddr)
-	if err := http.ListenAndServe(*listenAddr, newMux(server)); err != nil {
+	if err := http.ListenAndServe(*listenAddr, newMux(server, uiEnabled)); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}

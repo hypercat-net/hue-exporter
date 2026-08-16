@@ -11,7 +11,7 @@ deprecated or archived third-party Hue libraries required).
 
 * Uses the Hue **CLIP v2** (`/clip/v2/resource/...`) REST API directly
 * No dependency on deprecated Hue v1 client libraries
-* Provides a setup page to generate and persist a Hue API key
+* Optional setup UI (disabled by default) to generate and persist a Hue API key
 * Persists the discovered bridge IP and re-runs discovery if that bridge later becomes unreachable
 * Exports metrics for lights, grouped lights, motion sensors, temperature
   sensors, light-level sensors, device battery levels, Zigbee connectivity,
@@ -62,10 +62,18 @@ curl -k -X POST https://<bridge_ip>/api \
 
 Copy the `success.username` value from the response; this is your `app_key`.
 
-Alternatively, start the exporter, open `http://localhost:9366/`, and use the
-setup page to view the configured/discovered bridge host or IP, check whether
-an API key is set, and generate and persist a key after pressing the bridge
-link button.
+Alternatively, enable the setup UI and open `http://localhost:9366/`:
+
+```bash
+HUE_EXPORTER_ENABLE_SETUP_UI=true ./hue-exporter
+# or
+./hue-exporter --web.enable-setup-ui
+```
+
+Then use the setup page to view the configured/discovered bridge host or IP,
+check whether an API key is set, generate and persist a key after pressing the
+bridge link button, and save the bridge self-signed certificate into
+`tls_ca_cert_file`.
 
 ### 3. Configure TLS trust for the Hue bridge
 
@@ -85,7 +93,8 @@ openssl s_client -showcerts -connect <bridge_ip>:443 </dev/null 2>/dev/null \
 ### 4. Understand config and runtime state
 
 The exporter does **not** read environment variables for bridge settings or API
-credentials.
+credentials. The only runtime env override is
+`HUE_EXPORTER_ENABLE_SETUP_UI` for enabling the setup UI.
 
 There are two configuration layers:
 
@@ -214,6 +223,7 @@ No environment variables are required.
 |---|---|---|
 | `--config.file` | `hue_exporter.yml` | Path to config file |
 | `--web.listen-address` | `:9366` | Address to listen on |
+| `--web.enable-setup-ui` | `false` | Enable setup API UI endpoints (`/`, `/api/key`, `/api/cert`) |
 | `--healthcheck.target` | (empty) | Probe URL and exit with status 0 when healthy, 1 when unhealthy |
 
 ## Building
