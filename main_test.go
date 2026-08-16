@@ -254,7 +254,7 @@ func TestHomePageShowsBridgeAndAppKeyStatus(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
-	newMux(server).ServeHTTP(rec, req)
+	newMux(server, true).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("unexpected status: %d", rec.Code)
@@ -265,6 +265,9 @@ func TestHomePageShowsBridgeAndAppKeyStatus(t *testing.T) {
 	}
 	if !strings.Contains(body, "API key set: no") {
 		t.Fatalf("expected missing app key status, got: %s", body)
+	}
+	if !strings.Contains(body, "Bridge certificate file: not configured") {
+		t.Fatalf("expected certificate status, got: %s", body)
 	}
 }
 
@@ -340,7 +343,7 @@ func TestGenerateAppKeyPersistsState(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/key", nil)
 	rec := httptest.NewRecorder()
-	newMux(server).ServeHTTP(rec, req)
+	newMux(server, true).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("unexpected status: %d", rec.Code)
@@ -374,11 +377,158 @@ func TestGenerateAppKeyMethodNotAllowed(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/key", nil)
 	rec := httptest.NewRecorder()
-	newMux(server).ServeHTTP(rec, req)
+	newMux(server, true).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("unexpected status: %d", rec.Code)
 	}
+}
+
+func TestSaveBridgeCertificateMethodNotAllowed(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
+	server, err := newSetupServer(&Config{BridgeIP: "bridge.local"}, configPath, hue.ClientOptions{}, hueDiscoveryURL)
+	if err != nil {
+		t.Fatalf("newSetupServer returned error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/cert", nil)
+	rec := httptest.NewRecorder()
+	newMux(server, true).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+}
+
+func TestSaveBridgeCertificatePersistsConfig(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
+	server, err := newSetupServer(&Config{BridgeIP: "bridge.local", TLSInsecureSkipVerify: true}, configPath, hue.ClientOptions{InsecureSkipVerify: true}, hueDiscoveryURL)
+	if err != nil {
+		t.Fatalf("newSetupServer returned error: %v", err)
+	}
+	wantPEM := []byte("-----BEGIN CERTIFICATE-----\nZmFrZS1jZXJ0\n-----END CERTIFICATE-----\n")
+	server.fetchBridgeCert = func(bridgeAddress string) ([]byte, error) {
+		if bridgeAddress != "bridge.local" {
+			t.Fatalf("unexpected bridge address: %q", bridgeAddress)
+		}
+		return wantPEM, nil
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/cert", nil)
+	rec := httptest.NewRecorder()
+	newMux(server, true).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Bridge certificate saved and config updated.") {
+		t.Fatalf("expected success message, got: %s", body)
+	}
+
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadConfig returned error: %v", err)
+	}
+	wantCertPath := filepath.Join(filepath.Dir(configPath), "bridge-ca.pem")
+	if cfg.TLSCACertFile != wantCertPath {
+		t.Fatalf("unexpected tls_ca_cert_file: %q", cfg.TLSCACertFile)
+	}
+	if cfg.TLSInsecureSkipVerify {
+		t.Fatal("expected tls_insecure_skip_verify to be false")
+	}
+	gotPEM, err := os.ReadFile(wantCertPath)
+	if err != nil {
+		t.Fatalf("read saved cert file: %v", err)
+	}
+	if string(gotPEM) != string(wantPEM) {
+		t.Fatalf("unexpected cert file contents: %q", string(gotPEM))
+	}
+	if server.opts.InsecureSkipVerify {
+		t.Fatal("expected runtime insecure-skip-verify to be false")
+	}
+	if string(server.opts.CACert) != string(wantPEM) {
+		t.Fatalf("unexpected runtime cert contents: %q", string(server.opts.CACert))
+	}
+}
+
+func TestSetupUIDisabledByDefaultInMux(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
+	server, err := newSetupServer(&Config{BridgeIP: "bridge.local"}, configPath, hue.ClientOptions{}, hueDiscoveryURL)
+	if err != nil {
+		t.Fatalf("newSetupServer returned error: %v", err)
+	}
+	mux := newMux(server, false)
+
+	for _, tc := range []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodGet, path: "/"},
+		{method: http.MethodPost, path: "/api/key"},
+		{method: http.MethodPost, path: "/api/cert"},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("expected 404 for %s %s, got %d", tc.method, tc.path, rec.Code)
+		}
+	}
+}
+
+func TestSetupUIEnabledFromFlagAndEnv(t *testing.T) {
+	t.Run("default disabled", func(t *testing.T) {
+		t.Setenv("HUE_EXPORTER_ENABLE_SETUP_UI", "")
+		enabled, err := setupUIEnabled(false)
+		if err != nil {
+			t.Fatalf("setupUIEnabled returned error: %v", err)
+		}
+		if enabled {
+			t.Fatal("expected setup UI disabled by default")
+		}
+	})
+
+	t.Run("flag enables", func(t *testing.T) {
+		t.Setenv("HUE_EXPORTER_ENABLE_SETUP_UI", "")
+		enabled, err := setupUIEnabled(true)
+		if err != nil {
+			t.Fatalf("setupUIEnabled returned error: %v", err)
+		}
+		if !enabled {
+			t.Fatal("expected setup UI enabled from flag")
+		}
+	})
+
+	t.Run("env enables", func(t *testing.T) {
+		t.Setenv("HUE_EXPORTER_ENABLE_SETUP_UI", "true")
+		enabled, err := setupUIEnabled(false)
+		if err != nil {
+			t.Fatalf("setupUIEnabled returned error: %v", err)
+		}
+		if !enabled {
+			t.Fatal("expected setup UI enabled from environment")
+		}
+	})
+
+	t.Run("env false overrides flag", func(t *testing.T) {
+		t.Setenv("HUE_EXPORTER_ENABLE_SETUP_UI", "false")
+		enabled, err := setupUIEnabled(true)
+		if err != nil {
+			t.Fatalf("setupUIEnabled returned error: %v", err)
+		}
+		if enabled {
+			t.Fatal("expected setup UI disabled from environment override")
+		}
+	})
+
+	t.Run("invalid env fails", func(t *testing.T) {
+		t.Setenv("HUE_EXPORTER_ENABLE_SETUP_UI", "definitely-not-bool")
+		_, err := setupUIEnabled(false)
+		if err == nil || !strings.Contains(err.Error(), "invalid HUE_EXPORTER_ENABLE_SETUP_UI value") {
+			t.Fatalf("expected invalid env error, got: %v", err)
+		}
+	})
 }
 
 func TestMetricsUnavailableWithoutAppKey(t *testing.T) {
@@ -390,7 +540,7 @@ func TestMetricsUnavailableWithoutAppKey(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	rec := httptest.NewRecorder()
-	newMux(server).ServeHTTP(rec, req)
+	newMux(server, true).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("unexpected status: %d", rec.Code)
