@@ -12,9 +12,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -90,6 +92,13 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!DOCTYPE html>
 <h1>Hue Exporter</h1>
 {{if .Message}}<p style="color: green">{{.Message}}</p>{{end}}
 {{if .ErrorMessage}}<p style="color: red">{{.ErrorMessage}}</p>{{end}}
+<form method="post">
+  <label for="bridge-address">Bridge host/IP:</label>
+  <input id="bridge-address" name="bridge_address" type="text" value="{{.BridgeAddress}}">
+  <button type="submit" formaction="/api/bridge">Save bridge host/IP</button>
+  <button type="submit" formaction="/api/key">Generate and save API key</button>
+  <button type="submit" formaction="/api/cert">Save bridge certificate and update config</button>
+</form>
 <ul>
   <li>Bridge host/IP: {{if .BridgeAddress}}{{.BridgeAddress}}{{else}}not available{{end}}</li>
   <li>Bridge source: {{.BridgeSource}}</li>
@@ -97,12 +106,6 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!DOCTYPE html>
   <li>API key set: {{if .AppKeySet}}yes{{else}}no{{end}}</li>
   <li>Bridge certificate file: {{if .TLSCACertFile}}{{.TLSCACertFile}}{{else}}not configured{{end}}</li>
 </ul>
-<form method="post" action="/api/key">
-  <button type="submit">Generate and save API key</button>
-</form>
-<form method="post" action="/api/cert">
-  <button type="submit">Save bridge certificate and update config</button>
-</form>
 <p>Press the link button on the Hue Bridge before generating a key.</p>
 <p><a href="/metrics">Metrics</a></p>
 <p><a href="/healthz">Health</a></p>
@@ -329,6 +332,61 @@ func (s *setupServer) persistBridgeIPLocked(bridgeIP string) error {
 	return saveConfig(s.configPath, &s.config)
 }
 
+func normalizeBridgeAddress(raw string) (string, error) {
+	bridgeAddress := strings.TrimSpace(raw)
+	if bridgeAddress == "" {
+		return "", fmt.Errorf("bridge host/IP is required")
+	}
+	if strings.Contains(bridgeAddress, "://") {
+		parsed, err := url.Parse(bridgeAddress)
+		if err != nil {
+			return "", fmt.Errorf("invalid bridge host/IP %q: %w", raw, err)
+		}
+		if parsed.Host == "" {
+			return "", fmt.Errorf("invalid bridge host/IP %q", raw)
+		}
+		bridgeAddress = parsed.Host
+	}
+	if strings.ContainsRune(bridgeAddress, '/') {
+		return "", fmt.Errorf("invalid bridge host/IP %q", raw)
+	}
+	return bridgeAddress, nil
+}
+
+func (s *setupServer) persistConfiguredBridgeAddress(bridgeAddress string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.configuredBridge = bridgeAddress
+	s.bridge = bridgeStatus{
+		Address: bridgeAddress,
+		Source:  "configured",
+	}
+	s.config.BridgeIP = bridgeAddress
+	s.config.State.BridgeIP = bridgeAddress
+	return saveConfig(s.configPath, &s.config)
+}
+
+func (s *setupServer) bridgeStatusForRequest(r *http.Request) (bridgeStatus, error) {
+	if err := r.ParseForm(); err != nil {
+		return bridgeStatus{}, fmt.Errorf("parsing form: %w", err)
+	}
+	if rawBridgeAddress := r.FormValue("bridge_address"); rawBridgeAddress != "" {
+		bridgeAddress, err := normalizeBridgeAddress(rawBridgeAddress)
+		if err != nil {
+			return bridgeStatus{}, err
+		}
+		if err := s.persistConfiguredBridgeAddress(bridgeAddress); err != nil {
+			return bridgeStatus{}, err
+		}
+		return bridgeStatus{
+			Address: bridgeAddress,
+			Source:  "configured",
+		}, nil
+	}
+	return s.ensureBridgeStatus()
+}
+
 func (s *setupServer) ensureBridgeStatus() (bridgeStatus, error) {
 	s.mu.RLock()
 	bridge := s.bridge
@@ -428,7 +486,7 @@ func (s *setupServer) handleSaveBridgeCertificate(w http.ResponseWriter, r *http
 		return
 	}
 
-	bridge, err := s.ensureBridgeStatus()
+	bridge, err := s.bridgeStatusForRequest(r)
 	if err != nil {
 		s.renderHome(w, "", fmt.Sprintf("failed to prepare bridge status: %v", err))
 		return
@@ -449,6 +507,21 @@ func (s *setupServer) handleSaveBridgeCertificate(w http.ResponseWriter, r *http
 	}
 
 	s.renderHome(w, "Bridge certificate saved and config updated.", "")
+}
+
+func (s *setupServer) handleSaveBridgeAddress(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	bridge, err := s.bridgeStatusForRequest(r)
+	if err != nil {
+		s.renderHome(w, "", fmt.Sprintf("failed to save bridge host/IP: %v", err))
+		return
+	}
+
+	s.renderHome(w, fmt.Sprintf("Bridge host/IP saved: %s.", bridge.Address), "")
 }
 
 func (s *setupServer) bridgeClient() (*hue.Client, bridgeStatus, error) {
@@ -615,7 +688,7 @@ func (s *setupServer) handleGenerateAppKey(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	bridge, err := s.ensureBridgeStatus()
+	bridge, err := s.bridgeStatusForRequest(r)
 	if err != nil {
 		s.renderHome(w, "", fmt.Sprintf("failed to prepare bridge status: %v", err))
 		return
@@ -668,6 +741,7 @@ func newMux(server *setupServer, setupUIEnabled bool) *http.ServeMux {
 		_, _ = w.Write([]byte("ok"))
 	})
 	if setupUIEnabled {
+		mux.HandleFunc("/api/bridge", server.handleSaveBridgeAddress)
 		mux.HandleFunc("/api/key", server.handleGenerateAppKey)
 		mux.HandleFunc("/api/cert", server.handleSaveBridgeCertificate)
 		mux.HandleFunc("/", server.handleHome)

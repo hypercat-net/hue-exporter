@@ -826,6 +826,87 @@ func TestHandleGenerateAppKeyBridgeUnavailable(t *testing.T) {
 	}
 }
 
+func TestHandleGenerateAppKeyUsesSubmittedBridgeAddress(t *testing.T) {
+	discovery := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "", http.StatusTooManyRequests)
+	}))
+	defer discovery.Close()
+
+	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
+	server, err := newSetupServer(&Config{}, configPath, hue.ClientOptions{}, discovery.URL)
+	if err != nil {
+		t.Fatalf("newSetupServer returned error: %v", err)
+	}
+	server.createAppKey = func(bridgeAddress string) (string, error) {
+		if bridgeAddress != "192.168.1.20" {
+			t.Fatalf("unexpected bridge address: %q", bridgeAddress)
+		}
+		return "generated-key", nil
+	}
+
+	form := url.Values{"bridge_address": {"192.168.1.20"}}
+	req := httptest.NewRequest(http.MethodPost, "/api/key", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	server.handleGenerateAppKey(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "API key generated and saved.") {
+		t.Fatalf("unexpected body: %s", body)
+	}
+	if !strings.Contains(body, "Bridge host/IP: 192.168.1.20") {
+		t.Fatalf("unexpected body: %s", body)
+	}
+
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadConfig returned error: %v", err)
+	}
+	if cfg.BridgeIP != "192.168.1.20" {
+		t.Fatalf("unexpected configured bridge IP: %q", cfg.BridgeIP)
+	}
+	if cfg.State.AppKey != "generated-key" {
+		t.Fatalf("unexpected persisted app key: %q", cfg.State.AppKey)
+	}
+}
+
+func TestHandleSaveBridgeAddressPersistsConfiguredBridge(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
+	server, err := newSetupServer(&Config{}, configPath, hue.ClientOptions{}, hueDiscoveryURL)
+	if err != nil {
+		t.Fatalf("newSetupServer returned error: %v", err)
+	}
+
+	form := url.Values{"bridge_address": {"https://192.168.1.30"}}
+	req := httptest.NewRequest(http.MethodPost, "/api/bridge", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	server.handleSaveBridgeAddress(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Bridge host/IP saved: 192.168.1.30.") {
+		t.Fatalf("unexpected body: %s", body)
+	}
+	if !strings.Contains(body, "Bridge source: configured") {
+		t.Fatalf("unexpected body: %s", body)
+	}
+
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadConfig returned error: %v", err)
+	}
+	if cfg.BridgeIP != "192.168.1.30" {
+		t.Fatalf("unexpected configured bridge IP: %q", cfg.BridgeIP)
+	}
+	if cfg.State.BridgeIP != "192.168.1.30" {
+		t.Fatalf("unexpected persisted bridge IP: %q", cfg.State.BridgeIP)
+	}
+}
+
 func TestHandleSaveBridgeCertificateFailureRendersError(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "hue_exporter.yml")
 	server, err := newSetupServer(&Config{BridgeIP: "bridge.local"}, configPath, hue.ClientOptions{}, hueDiscoveryURL)

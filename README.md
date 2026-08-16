@@ -71,9 +71,10 @@ HUE_EXPORTER_ENABLE_SETUP_UI=true ./hue-exporter
 ```
 
 Then use the setup page to view the configured/discovered bridge host or IP,
-check whether an API key is set, generate and persist a key after pressing the
-bridge link button, and save the bridge self-signed certificate into
-`tls_ca_cert_file`.
+manually save the bridge host or IP when discovery is unavailable or
+rate-limited, check whether an API key is set, generate and persist a key after
+pressing the bridge link button, and save the bridge self-signed certificate
+into `tls_ca_cert_file`.
 
 ### 3. Configure TLS trust for the Hue bridge
 
