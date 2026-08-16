@@ -6,9 +6,13 @@ name: Dependabot auto-merge
 #
 # Prerequisites (one-time repository setup):
 #   1. Enable "Allow auto-merge" in Settings → General → Pull Requests.
-#   2. Add a branch-protection rule for `main` that requires the
-#      "Build and push Docker image / Build multi-platform image" check to
-#      pass — auto-merge will only complete after that check goes green.
+#   2. Protect `main` with a branch-protection rule that:
+#      - disables direct pushes
+#      - requires at least one approving review
+#      - requires these status checks:
+#        * "CI / Build and test"
+#        * "Build and push Docker image / Build multi-platform image"
+#      Auto-merge will only complete when all required checks pass.
 
 on:
   pull_request:

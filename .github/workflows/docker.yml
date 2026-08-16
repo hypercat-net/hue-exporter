@@ -43,9 +43,13 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=auto
           tags: |
-            # Tag semver releases as vX.Y.Z and as "latest"
+            # Tag semver releases as both vX.Y.Z and X.Y.Z.
+            type=semver,pattern=v{{version}}
             type=semver,pattern={{version}}
+            type=semver,pattern=v{{major}}.{{minor}}
             type=semver,pattern={{major}}.{{minor}}
             # Tag main branch as "edge"
             type=edge,branch=main
