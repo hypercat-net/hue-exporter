@@ -426,6 +426,9 @@ hue_zigbee_connected{id="zb-2",owner_id="device-9"} 0
 
 func TestSceneActive(t *testing.T) {
 	bridge := &mockBridge{
+		rooms: []hue.Room{
+			{ID: "room-1", Metadata: hue.Metadata{Name: "Living Room"}},
+		},
 		scenes: []hue.Scene{
 			{
 				ID:       "scene-1",
@@ -447,8 +450,8 @@ func TestSceneActive(t *testing.T) {
 	expected := `
 # HELP hue_scene_active Whether the scene is currently active (1) or not (0).
 # TYPE hue_scene_active gauge
-hue_scene_active{group_id="room-1",group_type="room",id="scene-1",name="Relax"} 1
-hue_scene_active{group_id="room-1",group_type="room",id="scene-2",name="Concentrate"} 0
+hue_scene_active{group_id="room-1",group_name="Living Room",group_type="room",id="scene-1",name="Relax"} 1
+hue_scene_active{group_id="room-1",group_name="Living Room",group_type="room",id="scene-2",name="Concentrate"} 0
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "hue_scene_active"); err != nil {
 		t.Errorf("unexpected metrics: %v", err)

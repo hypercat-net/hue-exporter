@@ -61,7 +61,7 @@ func New(bridge hue.Bridge) *HueCollector {
 	groupLabels := []string{"id", "owner_id", "owner_type", "owner_name"}
 	ownerLabels := []string{"id", "owner_id"}
 	deviceOwnerLabels := []string{"id", "owner_id", "owner_name"}
-	sceneLabels := []string{"id", "name", "group_id", "group_type"}
+	sceneLabels := []string{"id", "name", "group_id", "group_name", "group_type"}
 
 	return &HueCollector{
 		bridge: bridge,
@@ -513,11 +513,13 @@ func (c *HueCollector) collectScenes() {
 		c.sceneScrapesTotal.Add(1)
 		return
 	}
+	groupNames := c.groupedLightOwnerNames()
 	for _, s := range scenes {
 		labels := prometheus.Labels{
 			"id":         s.ID,
 			"name":       s.Metadata.Name,
 			"group_id":   s.Group.RID,
+			"group_name": groupNames[resourceKey(s.Group.RType, s.Group.RID)],
 			"group_type": s.Group.RType,
 		}
 		active := s.Status.Active != "inactive" && s.Status.Active != ""
