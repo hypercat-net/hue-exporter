@@ -58,7 +58,6 @@ type homePageData struct {
 	BridgeError   string
 	AppKeySet     bool
 	TLSCACertFile string
-	SetupUIEnabled bool
 	Message       string
 	ErrorMessage  string
 }
@@ -75,7 +74,6 @@ type setupServer struct {
 	fetchBridgeCert  func(string) ([]byte, error)
 	bridge           bridgeStatus
 	appKey           string
-	setupUIEnabled   bool
 	metricsHandler   http.Handler
 }
 
@@ -99,16 +97,12 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!DOCTYPE html>
   <li>API key set: {{if .AppKeySet}}yes{{else}}no{{end}}</li>
   <li>Bridge certificate file: {{if .TLSCACertFile}}{{.TLSCACertFile}}{{else}}not configured{{end}}</li>
 </ul>
-{{if .SetupUIEnabled}}
 <form method="post" action="/api/key">
   <button type="submit">Generate and save API key</button>
 </form>
 <form method="post" action="/api/cert">
   <button type="submit">Save bridge certificate and update config</button>
 </form>
-{{else}}
-<p>Setup UI is disabled.</p>
-{{end}}
 <p>Press the link button on the Hue Bridge before generating a key.</p>
 <p><a href="/metrics">Metrics</a></p>
 <p><a href="/healthz">Health</a></p>
@@ -587,7 +581,6 @@ func (s *setupServer) pageData(message, errorMessage string) homePageData {
 		BridgeError:   s.bridge.Error,
 		AppKeySet:     s.appKey != "",
 		TLSCACertFile: s.config.TLSCACertFile,
-		SetupUIEnabled: s.setupUIEnabled,
 		Message:       message,
 		ErrorMessage:  errorMessage,
 	}
@@ -668,10 +661,6 @@ func (s *setupServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 func newMux(server *setupServer, setupUIEnabled bool) *http.ServeMux {
-	server.mu.Lock()
-	server.setupUIEnabled = setupUIEnabled
-	server.mu.Unlock()
-
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", http.HandlerFunc(server.handleMetrics))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
