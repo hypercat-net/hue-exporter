@@ -2,7 +2,7 @@
 
 # Build stage — always runs on the host platform for speed;
 # cross-compiles to the target platform via GOOS/GOARCH.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
